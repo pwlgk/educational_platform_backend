@@ -31,10 +31,20 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
+    'django_filters',
+    'taggit',
     'channels',
     'corsheaders',
     'drf_spectacular',
+    'users',
     'monitor',
+    'schedule',
+    'news',
+    'messaging',
+    'forum',
+    'notifications',
+    
+    
 ]
 
 MIDDLEWARE = [
@@ -84,6 +94,8 @@ DATABASES = {
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
 
+AUTH_USER_MODEL = 'users.User'
+
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -115,7 +127,8 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = 'staticfiles/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
@@ -131,6 +144,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated', # Требовать аутентификацию по умолчанию
     ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema', # Для Swagger/OpenAPI
+    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend']
     # 'DEFAULT_THROTTLING_CLASSES': [ # Ограничение частоты запросов (рекомендуется для продакшена)
     #     'rest_framework.throttling.AnonRateThrottle',
     #     'rest_framework.throttling.UserRateThrottle'
@@ -141,16 +155,16 @@ REST_FRAMEWORK = {
     # }
 }
 
-# --- Настройки Simple JWT ---
+from datetime import timedelta
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15), # Время жизни Access токена
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),    # Время жизни Refresh токена
-    'ROTATE_REFRESH_TOKENS': True, # Генерировать новый Refresh токен при обновлении
-    'BLACKLIST_AFTER_ROTATION': True, # Добавлять старый Refresh токен в черный список
-    'UPDATE_LAST_LOGIN': False,
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60), # Увеличим время жизни
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True, # Обновлять last_login при получении токена
 
     'ALGORITHM': 'HS256',
-    'SIGNING_KEY': SECRET_KEY, # Используем Django SECRET_KEY для простоты, лучше генерировать отдельный
+    'SIGNING_KEY': SECRET_KEY, # Используйте переменную окружения для ключа в проде!
     'VERIFYING_KEY': None,
     'AUDIENCE': None,
     'ISSUER': None,
@@ -159,31 +173,23 @@ SIMPLE_JWT = {
 
     'AUTH_HEADER_TYPES': ('Bearer',),
     'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
-    'USER_ID_FIELD': 'id',
-    'USER_ID_CLAIM': 'user_id',
+    'USER_ID_FIELD': 'id', # Поле в вашей модели User
+    'USER_ID_CLAIM': 'user_id', # Имя поля в JWT payload
     'USER_AUTHENTICATION_RULE': 'rest_framework_simplejwt.authentication.default_user_authentication_rule',
 
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
     'TOKEN_TYPE_CLAIM': 'token_type',
-    'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
-
-    'JTI_CLAIM': 'jti',
-
-    'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
-    'SLIDING_TOKEN_LIFETIME': timedelta(minutes=5),
-    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
 
+# Настройки email (замените на реальные для отправки подтверждений)
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend' # Для вывода в консоль при разработке
+# EMAIL_HOST = 'smtp.example.com'
+# EMAIL_PORT = 587
+# EMAIL_USE_TLS = True
+# EMAIL_HOST_USER = 'your_email@example.com'
+# EMAIL_HOST_PASSWORD = 'your_password'
+# DEFAULT_FROM_EMAIL = 'webmaster@example.com'
 # --- Настройки Channels ---
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            # Укажите ваш хост и порт Redis
-            "hosts": [('127.0.0.1', 6379)],
-        },
-    },
-}
 
 # --- Настройки CORS ---
 CORS_ALLOW_ALL_ORIGINS = True # Для разработки. В продакшене используйте CORS_ALLOWED_ORIGINS

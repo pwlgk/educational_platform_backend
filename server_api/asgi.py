@@ -1,4 +1,3 @@
-# server_api/asgi.py
 import os
 import django
 from channels.routing import ProtocolTypeRouter, URLRouter
@@ -9,12 +8,16 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'server_api.settings')
 django.setup()
 
 import monitor.routing
+import messaging.routing
+import notifications.routing
 
 application = ProtocolTypeRouter({
     "http": get_asgi_application(),
     "websocket": JwtAuthMiddlewareStack( 
         URLRouter(
-            monitor.routing.websocket_urlpatterns
+            monitor.routing.websocket_urlpatterns +
+            messaging.routing.websocket_urlpatterns +
+            notifications.routing.websocket_urlpatterns
         )
     ),
 })
