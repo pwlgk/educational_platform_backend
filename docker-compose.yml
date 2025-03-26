@@ -1,0 +1,49 @@
+version: '3.8' # Используем актуальную версию синтаксиса
+
+services:
+  # Сервис для Redis
+  redis:
+    image: redis:alpine # Используем легковесный образ Redis
+    container_name: server_monitor_redis # Имя контейнера (опционально)
+    ports:
+      - "6379:6379" # Пробрасываем порт Redis на хост (для возможного внешнего подключения/отладки)
+    restart: unless-stopped # Перезапускать, если не был остановлен вручную
+    volumes:
+      - redis_data:/data # Опционально: для сохранения данных Redis между перезапусками
+    healthcheck:
+        test: ["CMD", "redis-cli", "ping"] # Проверка, что Redis отвечает
+        interval: 10s
+        timeout: 5s
+        retries: 5
+
+  # Сервис для вашего Django API
+  api:
+    build: . # Собирать образ из Dockerfile в текущей директории
+    container_name: server_monitor_api # Имя контейнера (опционально)
+    ports:
+      - "8000:8000" # Пробрасываем порт API на хост
+    volumes:
+      # Подключаем код проекта с хоста в контейнер для live-reload (если используется в CMD)
+      # и чтобы не пересобирать образ при каждом изменении кода
+      - .:/app
+      # Опционально: Подключить том для базы данных SQLite, если она используется
+      # - sqlite_data:/app/db
+    env_file:
+      - .env # Опционально: загрузка переменных окружения из файла .env
+    environment:
+      # Переменные окружения для Django
+      - DJANGO_SETTINGS_MODULE=server_api.settings
+      - DEBUG=True # Установите False для симуляции продакшена
+      - SECRET_KEY=your-insecure-test-secret-key # Замените на ваш тестовый ключ
+      # Переменные для подключения к Redis (хост - имя сервиса redis)
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Добавьте другие переменные окружения, если необходимо
+    depends_on:
+      redis: # Указываем, что сервис api зависит от сервиса redis
+        condition: service_healthy # Ждать, пока healthcheck Redis не пройдет
+    restart: unless-stopped # Перезапускать, если не был остановлен вручную
+
+volumes:
+  redis_data: # Определяем том для данных Redis
+  # sqlite_data: # Определяем том для SQLite
