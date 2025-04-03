@@ -8,19 +8,59 @@ class ProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = Profile
         fields = ('avatar', 'phone_number', 'bio', 'date_of_birth')
-        read_only_fields = ('user',) # Пользователь не меняется
 
 class UserSerializer(serializers.ModelSerializer):
-    profile = ProfileSerializer(read_only=True) # Вложенный профиль для чтения
+    # profile = ProfileSerializer(read_only=True) # <-- БЫЛО
+    profile = ProfileSerializer(required=False) # <-- СТАЛО: убираем read_only, делаем необязательным для PATCH
 
     class Meta:
         model = User
         fields = (
             'id', 'email', 'first_name', 'last_name', 'patronymic',
             'role', 'profile', 'is_active', 'is_role_confirmed', 'date_joined'
-            # Не включаем is_staff, is_superuser, password и т.д. по умолчанию
         )
-        read_only_fields = ('email', 'role', 'is_active', 'is_role_confirmed', 'date_joined') # Что нельзя менять через этот сериализатор
+        # Поля User, которые НЕЛЬЗЯ изменять через этот API эндпоинт
+        read_only_fields = ('id', 'email', 'role', 'is_active', 'is_role_confirmed', 'date_joined')
+
+    def update(self, instance, validated_data):
+        """
+        Обрабатывает обновление пользователя и его вложенного профиля.
+        """
+        # Извлекаем данные профиля из validated_data.
+        # validated_data может не содержать 'profile' при PATCH запросе,
+        # если обновляются только поля User.
+        profile_data = validated_data.pop('profile', None)
+
+        # Обновляем вложенный профиль, если данные для него переданы
+        if profile_data is not None:
+            # Получаем или создаем связанный профиль (на случай, если его вдруг нет)
+            profile_instance, created = Profile.objects.get_or_create(user=instance)
+
+            # Используем ProfileSerializer для обновления данных профиля.
+            # partial=True важно для поддержки PATCH (обновляем только переданные поля).
+            profile_serializer = ProfileSerializer(
+                instance=profile_instance,
+                data=profile_data,
+                partial=True # Обязательно для PATCH
+            )
+            # Валидируем и сохраняем данные профиля
+            if profile_serializer.is_valid(raise_exception=True):
+                profile_serializer.save()
+            # Альтернативно, можно было бы обновлять поля вручную:
+            # for attr, value in profile_data.items():
+            #     setattr(profile_instance, attr, value)
+            # profile_instance.save()
+
+        # Обновляем поля самого пользователя (User).
+        # Вызываем метод update родительского класса ModelSerializer.
+        # Он автоматически обновит поля 'first_name', 'last_name', 'patronymic'
+        # и другие не read-only поля User, если они были в validated_data.
+        instance = super().update(instance, validated_data)
+
+        # Важно: super().update() может перезаписать instance, поэтому
+        # нужно присвоить результат обратно instance и вернуть его.
+
+        return instance
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True, validators=[validate_password])

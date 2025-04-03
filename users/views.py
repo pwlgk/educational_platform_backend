@@ -46,18 +46,22 @@ class ConfirmEmailView(APIView):
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
-    """Просмотр и обновление профиля текущего пользователя."""
-    queryset = Profile.objects.all()
-    serializer_class = ProfileSerializer
-    permission_classes = [permissions.IsAuthenticated, IsOwnerOrAdmin]
+    """Просмотр и ОБНОВЛЕНИЕ данных ТЕКУЩЕГО пользователя (включая профиль)."""
+    serializer_class = UserSerializer # Используем обновленный UserSerializer
+    permission_classes = [permissions.IsAuthenticated] # Достаточно, т.к. get_object гарантирует работу только с request.user
+
+    def get_queryset(self):
+        # Возвращаем queryset для User, отфильтрованный по текущему пользователю
+        return User.objects.filter(pk=self.request.user.pk)
 
     def get_object(self):
-        # Возвращаем профиль текущего пользователя
-        # get_object_or_404 не сработает напрямую, т.к. user не PK профиля
-        profile, created = Profile.objects.get_or_create(user=self.request.user)
-        # Проверяем права доступа объекта вручную, так как get_object_or_404 не вызывается
-        self.check_object_permissions(self.request, profile)
-        return profile
+        # Всегда возвращаем объект ТЕКУЩЕГО пользователя (request.user)
+        # Это гарантирует, что пользователь может редактировать только свой профиль
+        user = self.request.user
+        # Проверки прав на объект (вроде IsOwnerOrAdmin) здесь избыточны,
+        # так как мы жестко привязаны к request.user.
+        # self.check_object_permissions(self.request, user) # Можно раскомментировать, если есть специфичные проверки
+        return user
 
 
 class UserViewSet(viewsets.ReadOnlyModelViewSet):

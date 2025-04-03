@@ -1,4 +1,4 @@
-#!/home/pg/Documents/Develop/Python/django/server_monitor_api/.venv/bin/python3
+#!/home/pg/Documents/Develop/education_dev/educational_platform_backend/.venv/bin/python3.12
 # -*- coding: utf-8 -*-
 import re
 import sys
