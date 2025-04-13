@@ -65,6 +65,14 @@ class ForumTopic(models.Model):
     def post_count(self):
         """Возвращает количество постов в теме."""
         return self.posts.count() # Динамический подсчет
+    
+    @property
+    def last_post(self):
+        """Возвращает последний пост в теме или None."""
+        # Импортируем здесь, чтобы избежать циклического импорта
+        from .models import ForumPost
+        # order_by('-created_at') или по pk, если auto_now_add у поста
+        return self.posts.select_related('author').order_by('-created_at').first()
 
 
 class ForumPost(models.Model):

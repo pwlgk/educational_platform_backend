@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'messaging',
     'forum',
     'notifications',
+    'core',
     
     
 ]

@@ -3,6 +3,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.validators import EmailValidator
 from django.utils import timezone
 from .models import User, Profile, InvitationCode
+import uuid
 
 class ProfileSerializer(serializers.ModelSerializer):
     class Meta:

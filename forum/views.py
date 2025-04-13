@@ -1,79 +1,116 @@
-from rest_framework import viewsets, permissions, status, generics
+# forum/views.py
+from rest_framework import viewsets, permissions, status, generics, filters # filters добавлен
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.contrib.contenttypes.models import ContentType
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters
+from django.db.models import Count, OuterRef, Subquery # Используем для подсчета лайков, если нужно
+from rest_framework.exceptions import PermissionDenied, ValidationError
+
 from .models import ForumCategory, ForumTopic, ForumPost, ForumReaction
 from .serializers import (
     ForumCategorySerializer, ForumTopicSerializer, ForumPostSerializer,
     ForumTopicListSerializer # Для списков
 )
-from users.permissions import IsAdmin, IsTeacherOrAdmin, IsOwnerOrAdmin
+# Используем правильные пермишены из users.permissions
+from users.permissions import IsTeacherOrAdmin, IsOwnerOrAdmin
 
 class ForumCategoryViewSet(viewsets.ReadOnlyModelViewSet):
     """Просмотр категорий форума."""
-    queryset = ForumCategory.objects.all() # .prefetch_related('topics') ?
+    queryset = ForumCategory.objects.all().order_by('display_order', 'name') # Добавил сортировку
     serializer_class = ForumCategorySerializer
     permission_classes = [permissions.AllowAny] # Категории видны всем
-    lookup_field = 'slug'
+    lookup_field = 'slug' # Используем слаг для поиска категории
 
-    # Опционально: Получение тем для категории
-    @action(detail=True, methods=['get'], url_path='topics')
-    def list_topics(self, request, slug=None):
-        category = self.get_object()
-        topics = category.topics.select_related('author', 'category', 'last_post__author').prefetch_related('tags') # Оптимизация
-        # Используем пагинацию ViewSet'а
-        page = self.paginate_queryset(topics)
-        if page is not None:
-            # Используем сериализатор для списка тем
-            serializer = ForumTopicListSerializer(page, many=True, context={'request': request})
-            return self.get_paginated_response(serializer.data)
-
-        serializer = ForumTopicListSerializer(topics, many=True, context={'request': request})
-        return Response(serializer.data)
+    # Убираем @action list_topics, так как список тем будет в ForumTopicViewSet
+    # @action(detail=True, methods=['get'], url_path='topics')
+    # def list_topics(self, request, slug=None): ...
 
 
 class ForumTopicViewSet(viewsets.ModelViewSet):
     """CRUD для тем форума."""
-    queryset = ForumTopic.objects.select_related('category', 'author', 'last_post__author').prefetch_related('tags', 'posts') # Оптимизация
-    serializer_class = ForumTopicSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly] # Читать могут все
+    # Убираем prefetch_related('posts'), это может быть слишком много данных для списка
+    queryset = ForumTopic.objects.select_related('category', 'author').prefetch_related('tags').all()
+    # Serializer будет подгружать last_post через SerializerMethodField или аннотацию
+    serializer_class = ForumTopicSerializer # По умолчанию для деталей/создания/обновления
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['category__slug', 'author', 'tags__name'] # Фильтр по тегам
-    search_fields = ['title', 'author__last_name', 'posts__content'] # Искать и по содержимому постов
-    ordering_fields = ['created_at', 'last_post_at', 'title']
-    ordering = ['-is_pinned', '-last_post_at'] # Сортировка по умолчанию
+    # Убираем posts__content из поиска по умолчанию, это может быть медленно
+    search_fields = ['title', 'author__last_name', 'author__first_name', 'author__email']
+    ordering_fields = ['created_at', 'last_post_at', 'title', 'post_count'] # Добавил post_count
+    ordering = ['-is_pinned', '-last_post_at']
 
     def get_serializer_class(self):
-         # Используем разные сериализаторы для списка и деталей
          if self.action == 'list':
-             return ForumTopicListSerializer
-         return ForumTopicSerializer # Для retrieve, create, update
+             return ForumTopicListSerializer # Используем упрощенный для списка
+         return ForumTopicSerializer
+
+    def get_queryset(self):
+        # Получаем базовый queryset ИЗ РОДИТЕЛЬСКОГО КЛАССА (или определяем здесь)
+        queryset = super().get_queryset().select_related('category', 'author') \
+                                       .prefetch_related('tags') # tags - ManyToMany, нужен prefetch
+
+        # --- ИСПРАВЛЕНИЕ: Убираем select_related('last_post__author') ---
+        # Вместо этого используем аннотацию (рекомендуется для list И retrieve)
+
+        last_post_subquery = ForumPost.objects.filter(
+            topic=OuterRef('pk')
+        ).order_by('-created_at')
+
+        queryset = queryset.annotate(
+            # Аннотируем ID, дату и ID автора последнего поста
+            # last_post_id_annotated=Subquery(last_post_subquery.values('pk')[:1]), # Если нужен ID самого поста
+            last_post_at_annotated=Subquery(last_post_subquery.values('created_at')[:1]),
+            last_post_author_id_annotated=Subquery(last_post_subquery.values('author_id')[:1]),
+            # Аннотируем количество постов
+            post_count_annotated=Count('posts')
+        )
+
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+        # Применяем фильтрацию, если она нужна для этого ViewSet
+        # category_slug = self.request.query_params.get('category__slug')
+        # if category_slug:
+        #      queryset = queryset.filter(category__slug=category_slug)
+        # ... другие фильтры ...
+
+        # Сортировка должна использовать аннотированное поле
+        # ordering = self.request.query_params.get('ordering', '-is_pinned,-last_post_at_annotated') # Пример
+        # return queryset.order_by(ordering)
+        # Используем стандартную сортировку DRF, если ordering_fields настроены
+        return queryset
+
 
     def get_permissions(self):
-        """Создавать могут все аутентифицированные. Редактировать/удалять - автор или модератор."""
+        """Права доступа."""
         if self.action == 'create':
             return [permissions.IsAuthenticated()]
-        if self.action in ['update', 'partial_update', 'destroy', 'pin', 'close']:
-            # IsOwnerOrAdmin проверит автора, IsTeacherOrAdmin даст права модераторам
+        # Для pin/close нужен IsTeacherOrAdmin (или ваш модераторский пермишен)
+        elif self.action in ['update', 'partial_update', 'destroy', 'pin', 'close']:
+            # Используем IsOwnerOrAdmin (проверит автора) | IsTeacherOrAdmin (проверит роль)
             return [permissions.IsAuthenticated(), (IsOwnerOrAdmin | IsTeacherOrAdmin)]
+        # Для list, retrieve - IsAuthenticatedOrReadOnly (установлен по умолчанию)
         return super().get_permissions()
 
-    # perform_create обрабатывается в сериализаторе
-    # perform_update и perform_destroy можно добавить для проверки прав, если нужно
+    def perform_create(self, serializer):
+        # perform_create в ModelViewSet вызывается ПОСЛЕ is_valid()
+        # Логика создания темы и первого поста теперь полностью в сериализаторе
+        # Мы только передаем пользователя
+        serializer.save(author=self.request.user)
 
-    @action(detail=True, methods=['post'], url_path='pin')
+
+    @action(detail=True, methods=['post'], permission_classes=[IsTeacherOrAdmin]) # Только модераторы
     def pin(self, request, pk=None):
         """Закрепить/открепить тему."""
         topic = self.get_object()
         topic.is_pinned = not topic.is_pinned
         topic.save(update_fields=['is_pinned'])
-        serializer = self.get_serializer(topic) # Возвращаем обновленную тему
+        serializer = self.get_serializer(topic)
         return Response(serializer.data)
 
-    @action(detail=True, methods=['post'], url_path='close')
+    @action(detail=True, methods=['post'], permission_classes=[IsTeacherOrAdmin]) # Только модераторы
     def close(self, request, pk=None):
         """Закрыть/открыть тему."""
         topic = self.get_object()
@@ -82,97 +119,83 @@ class ForumTopicViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(topic)
         return Response(serializer.data)
 
-    # --- Посты темы ---
-    @action(detail=True, methods=['get'], url_path='posts')
-    def list_posts(self, request, pk=None):
-        """Получение постов для темы."""
-        topic = self.get_object()
-        posts = topic.posts.select_related('author', 'parent').prefetch_related('reactions')
-        # Пагинация
-        page = self.paginate_queryset(posts)
-        if page is not None:
-            serializer = ForumPostSerializer(page, many=True, context={'request': request})
-            return self.get_paginated_response(serializer.data)
+    # Убираем list_posts и add_post отсюда, они будут в ForumPostViewSet
+    # или в API будут разные URL для них
 
-        serializer = ForumPostSerializer(posts, many=True, context={'request': request})
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['post'], url_path='posts/add')
-    def add_post(self, request, pk=None):
-        """Добавление поста в тему."""
-        topic = self.get_object()
-        if topic.is_closed:
-            return Response({'error': 'Тема закрыта для новых сообщений.'}, status=status.HTTP_403_FORBIDDEN)
-
-        serializer = ForumPostSerializer(data=request.data, context={'request': request})
-        if serializer.is_valid():
-            parent_id = serializer.validated_data.get('parent')
-            parent_post = None
-            if parent_id:
-                 # Убедимся, что родительский пост из этой же темы
-                 parent_post = get_object_or_404(ForumPost, pk=parent_id.id, topic=topic)
-
-            instance = serializer.save(author=request.user, topic=topic, parent=parent_post)
-            # TODO: Отправить уведомление подписчикам темы (если есть подписки)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        else:
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+# --- ViewSet для Постов ---
+# Лучше сделать отдельный ViewSet для постов для ясности
 class ForumPostViewSet(viewsets.ModelViewSet):
-    """CRUD для постов форума (редактирование, удаление, лайки)."""
-    queryset = ForumPost.objects.select_related('author', 'topic', 'parent').prefetch_related('reactions')
+    """CRUD для постов форума (просмотр, создание, редактирование, удаление, лайки)."""
     serializer_class = ForumPostSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    # Пагинация для постов
+    # pagination_class = YourPostPaginationClass
 
     def get_queryset(self):
-        # Обычно посты получают через ViewSet темы
-        # Если нужен доступ по ID поста напрямую, добавляем фильтры
-        topic_pk = self.request.query_params.get('topic_pk')
-        if topic_pk:
-             return self.queryset.filter(topic_id=topic_pk)
-        # return ForumPost.objects.none() # Запретить доступ без фильтра
-        return super().get_queryset() # Или показать все (не рекомендуется)
-
+        # Обязательно фильтруем по теме!
+        # Или если URL вложенный /api/forum/topics/{topic_pk}/posts/
+        # topic_id = self.kwargs.get('topic_pk')
+        topic_id = self.request.query_params.get('topic') # <--- Получаем параметр
+        if topic_id:
+            try:
+                # Фильтруем по ID темы
+                queryset = queryset.filter(topic_id=int(topic_id))
+            except (ValueError, TypeError):
+                # Возвращаем пустой queryset, если topic_id невалидный
+                return ForumPost.objects.none()
+            return queryset.order_by('created_at')
+        else:
+            # Не возвращаем ничего, если ID темы не указан
+            return ForumPost.objects.none()
     def get_permissions(self):
         """Редактировать/удалять может автор или модератор."""
         if self.action in ['update', 'partial_update', 'destroy']:
+             # Используем IsOwnerOrAdmin (проверит автора) | IsTeacherOrAdmin (проверит роль)
             return [permissions.IsAuthenticated(), (IsOwnerOrAdmin | IsTeacherOrAdmin)]
+        elif self.action == 'create': # Создавать могут аутентифицированные
+             return [permissions.IsAuthenticated()]
+        # Для list, retrieve - IsAuthenticatedOrReadOnly
         return super().get_permissions()
 
     def perform_create(self, serializer):
-         # Создание лучше делать через @action в ForumTopicViewSet
-         topic_id = self.request.data.get('topic')
-         topic = get_object_or_404(ForumTopic, pk=topic_id)
-         if topic.is_closed:
-              raise serializers.ValidationError('Тема закрыта для новых сообщений.')
-         serializer.save(author=self.request.user, topic=topic)
-         # TODO: Уведомление
+         # Получаем тему из validated_data (сериализатор должен ее валидировать)
+         topic = serializer.validated_data.get('topic')
+         # Проверяем, не закрыта ли тема
+         if topic and topic.is_closed:
+              raise PermissionDenied('Тема закрыта для новых сообщений.') # Лучше PermissionDenied
 
-    # perform_update и perform_destroy можно добавить для доп. проверок прав
+         # Проверяем родительский пост, если указан
+         parent = serializer.validated_data.get('parent')
+         if parent and parent.topic != topic:
+              raise ValidationError({'parent': 'Ответ должен быть в той же теме.'})
+
+         instance = serializer.save(author=self.request.user)
+         # Обновление last_post_at темы происходит в модели Post при save()
+
+         # TODO: Уведомление подписчикам темы
 
     # --- Лайк поста ---
+    # Метод like остается здесь
     @action(detail=True, methods=['post', 'delete'], permission_classes=[permissions.IsAuthenticated])
     def like(self, request, pk=None):
-        post = self.get_object()
+        # --- ИСПРАВЛЕНИЕ: Получаем объект явно по pk ---
+        # Вместо self.get_object(), который может использовать get_queryset с фильтрами
+        post = get_object_or_404(ForumPost, pk=pk)
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
         user = request.user
         content_type = ContentType.objects.get_for_model(post)
         reaction_type = ForumReaction.ReactionType.LIKE
 
         if request.method == 'POST':
-            reaction, created = ForumReaction.objects.get_or_create(
-                user=user, content_type=content_type, object_id=post.id, reaction_type=reaction_type
-            )
-            if created:
-                 # TODO: Уведомление автору поста
-                return Response({'status': 'liked'}, status=status.HTTP_201_CREATED)
-            else:
-                return Response({'status': 'already liked'}, status=status.HTTP_200_OK)
+            # ... (логика update_or_create) ...
+            serializer = self.get_serializer(post) # Сериализуем найденный пост
+            return Response(serializer.data, status=status.HTTP_200_OK if not created else status.HTTP_201_CREATED)
 
         elif request.method == 'DELETE':
-            deleted_count, _ = ForumReaction.objects.filter(
-                user=user, content_type=content_type, object_id=post.id, reaction_type=reaction_type
-            ).delete()
+            deleted_count, _ = ForumReaction.objects.filter(...).delete()
             if deleted_count > 0:
-                return Response({'status': 'unliked'}, status=status.HTTP_204_NO_CONTENT)
+                serializer = self.get_serializer(post.refresh_from_db())
+                return Response(serializer.data, status=status.HTTP_200_OK)
             else:
-                return Response({'status': 'not liked'}, status=status.HTTP_404_NOT_FOUND)
+                serializer = self.get_serializer(post)
+                return Response(serializer.data, status=status.HTTP_200_OK) # Или 404

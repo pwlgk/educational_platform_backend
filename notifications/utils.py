@@ -1,6 +1,9 @@
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+
+from messaging.models import Chat
 from .models import Notification, UserNotificationSettings
 from .serializers import NotificationSerializer
 
