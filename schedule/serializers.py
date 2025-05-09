@@ -5,6 +5,9 @@ from .models import Subject, StudentGroup, Classroom, Lesson
 # Импортируем сериализатор пользователя для вложенного отображения
 from users.serializers import UserSerializer # Убедитесь, что users app доступен
 from django.contrib.auth import get_user_model
+from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
+
 
 from schedule import models
 
@@ -71,51 +74,58 @@ class LessonSerializer(serializers.ModelSerializer):
         read_only_fields = ('created_at', 'updated_at', 'created_by')
 
     def validate(self, data):
-        """Валидация на уровне сериализатора."""
-        start_time = data.get('start_time') or getattr(self.instance, 'start_time', None)
-        end_time = data.get('end_time') or getattr(self.instance, 'end_time', None)
-        teacher = data.get('teacher') or getattr(self.instance, 'teacher', None)
-        group = data.get('group') or getattr(self.instance, 'group', None)
-        classroom = data.get('classroom', None) # Может быть None при записи
-        if self.instance: # Если это обновление, classroom может быть в instance
-             classroom = data.get('classroom', getattr(self.instance, 'classroom', None))
+        """Валидация на пересечения и вместимость."""
+        instance = self.instance # Для режима редактирования
+        start_time = data.get('start_time', getattr(instance, 'start_time', None))
+        end_time = data.get('end_time', getattr(instance, 'end_time', None))
+        classroom_id = data.get('classroom_id', getattr(instance, 'classroom_id', None))
+        teacher_id = data.get('teacher_id', getattr(instance, 'teacher_id', None))
+        group_id = data.get('group_id', getattr(instance, 'group_id', None))
 
-        # 1. Проверка времени
-        if start_time and end_time and start_time >= end_time:
-            raise serializers.ValidationError(_('Время окончания должно быть позже времени начала.'))
+        classroom = Classroom.objects.filter(pk=classroom_id).first() if classroom_id else None
+        teacher = User.objects.filter(pk=teacher_id).first() if teacher_id else None # Импортируйте User
+        group = StudentGroup.objects.filter(pk=group_id).first() if group_id else None
 
-        # 2. Проверка пересечений (используя Q-объекты для OR)
-        overlapping_lessons = Lesson.objects.filter(
-            # Ищем пересечения по ЛЮБОМУ из: аудитория (если есть), преподаватель, группа
-            models.Q(classroom=classroom) if classroom else models.Q(), # Только если аудитория указана
-            models.Q(teacher=teacher) | models.Q(group=group),
-            start_time__lt=end_time,    # Занятие начинается до окончания нового
-            end_time__gt=start_time     # Занятие заканчивается после начала нового
+        if not start_time or not end_time:
+             raise serializers.ValidationError(_("Start time and end time are required."))
+
+        if start_time >= end_time:
+             raise serializers.ValidationError(_('End time must be after start time.'))
+
+        # Собираем условия для проверки пересечений
+        conflict_query = Q(start_time__lt=end_time) & Q(end_time__gt=start_time)
+        potential_conflicts = (
+             (Q(teacher=teacher) if teacher else Q()) | # Проверка на учителя
+             (Q(group=group) if group else Q()) |       # Проверка на группу
+             (Q(classroom=classroom) if classroom else Q()) # Проверка на аудиторию
         )
-        if self.instance: # Исключаем себя при обновлении
-            overlapping_lessons = overlapping_lessons.exclude(pk=self.instance.pk)
+
+        overlapping_lessons = Lesson.objects.filter(
+             conflict_query & potential_conflicts
+        )
+
+        if instance: # Исключаем себя при обновлении
+             overlapping_lessons = overlapping_lessons.exclude(pk=instance.pk)
 
         if overlapping_lessons.exists():
-             # Формируем сообщение об ошибке (более детально, чем в модели)
              conflicts = []
-             for lesson in overlapping_lessons.select_related('classroom', 'teacher', 'group'): # Оптимизация
-                 if classroom and lesson.classroom == classroom: conflicts.append(f"Аудитория ({classroom.identifier})")
-                 if lesson.teacher == teacher: conflicts.append(f"Преподаватель ({teacher.get_full_name()})")
-                 if lesson.group == group: conflicts.append(f"Группа ({group.name})")
+             # Определяем, по какому ресурсу произошло пересечение (упрощенно)
+             for lesson in overlapping_lessons.filter(teacher=teacher): conflicts.append(f"Teacher ({teacher})"); break
+             for lesson in overlapping_lessons.filter(group=group): conflicts.append(f"Group ({group})"); break
+             for lesson in overlapping_lessons.filter(classroom=classroom): conflicts.append(f"Classroom ({classroom})"); break
 
-             if conflicts:
-                 unique_conflicts = ", ".join(sorted(list(set(conflicts))))
-                 raise serializers.ValidationError(_(f'Обнаружено пересечение занятий по времени для: {unique_conflicts}.'))
+             unique_conflicts = ", ".join(sorted(list(set(conflicts)))) or "Unknown resource"
+             raise serializers.ValidationError(
+                  f"Lesson time conflict detected for: {unique_conflicts}."
+             )
 
-
-        # 3. Проверка вместимости аудитории
+        # Проверка вместимости
         if classroom and group:
-            # Получаем количество студентов (лучше получить group из data, если он там есть)
-            group_instance = data.get('group', getattr(self.instance, 'group', None))
-            if group_instance and group_instance.students.count() > classroom.capacity:
-                raise serializers.ValidationError(
-                     _(f'Вместимость аудитории {classroom.identifier} ({classroom.capacity}) меньше, '
-                       f'чем количество студентов в группе {group_instance.name} ({group_instance.students.count()}).')
+            # Получаем количество студентов в группе (может потребоваться оптимизация)
+             student_count = group.students.count()
+             if student_count > classroom.capacity:
+                 raise serializers.ValidationError(
+                     f'Classroom capacity {classroom.capacity} is less than group size {student_count}.'
                  )
 
         return data

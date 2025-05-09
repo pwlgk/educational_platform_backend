@@ -8,9 +8,17 @@ from .serializers import (
     SubjectSerializer, StudentGroupSerializer, ClassroomSerializer,
     LessonSerializer, ScheduleListSerializer
 )
+
 from users.permissions import IsAdmin, IsTeacher, IsTeacherOrAdmin # Импортируем права из users
 from django_filters.rest_framework import DjangoFilterBackend # Для фильтрации
 from rest_framework import filters # Для поиска и сортировки
+from .filters import LessonDateRangeFilter
+from rest_framework.pagination import PageNumberPagination
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 10 # Количество по умолчанию
+    page_size_query_param = 'page_size' # Позволяет клиенту менять размер страницы
+    max_page_size = 100
 
 class SubjectViewSet(viewsets.ModelViewSet):
     """CRUD для учебных предметов (только Админы)."""
@@ -43,6 +51,7 @@ class LessonViewSet(viewsets.ModelViewSet):
     serializer_class = LessonSerializer
     permission_classes = [permissions.IsAuthenticated, IsTeacherOrAdmin] # Создавать/редактировать могут учителя и админы
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = StandardResultsSetPagination
     # Фильтры
     filterset_fields = {
         'start_time': ['gte', 'lte', 'exact', 'date'], # Фильтры по дате/времени начала
@@ -93,59 +102,73 @@ class LessonViewSet(viewsets.ModelViewSet):
 
 
 class MyScheduleView(generics.ListAPIView):
-    """
-    Получение расписания для текущего пользователя (Студент, Преподаватель, Родитель).
-    Поддерживает фильтрацию по дате (?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD).
-    """
-    serializer_class = ScheduleListSerializer # Используем компактный сериализатор
+    serializer_class = ScheduleListSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    # Простые фильтры по дате
-    filterset_fields = {
-         'start_time': ['gte', 'lte', 'exact', 'date'],
-         'end_time': ['gte', 'lte', 'exact', 'date'],
-    }
+    filterset_class = LessonDateRangeFilter
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         user = self.request.user
-        now = timezone.now()
-        queryset = Lesson.objects.select_related(
-            'subject', 'teacher', 'group', 'classroom'
-        ).order_by('start_time') # Оптимизация
+        print(f"DEBUG [MyScheduleView]: Checking user: {user.email}, Role: {getattr(user, 'role', 'N/A')}, is_staff={user.is_staff}") # Логируем роль из модели User
 
-        # Фильтруем queryset в зависимости от роли пользователя
-        if user.is_student:
-            # Студент видит занятия своей группы
-            queryset = queryset.filter(group__students=user)
-        elif user.is_teacher:
-            # Преподаватель видит свои занятия
-            queryset = queryset.filter(teacher=user)
-        elif user.is_parent and user.related_child:
-            # Родитель видит занятия связанного ребенка
-            queryset = queryset.filter(group__students=user.related_child)
-        elif user.is_admin:
-             # Админ видит все (или можно сделать отдельный эндпоинт для полного расписания)
-             # return queryset # Показываем все админу
-             return Lesson.objects.none() # Или ничего, если админ должен использовать LessonViewSet
+        queryset = Lesson.objects.none()
+
+        # --- Фильтрация по роли пользователя ---
+        try:
+            # Используем поле role из модели User (если оно там есть)
+            user_role = getattr(user, 'role', None)
+
+            if user_role == 'STUDENT':
+                print("DEBUG: User role is STUDENT.")
+                # Получаем группы через related_name 'student_groups'
+                student_groups_qs = user.student_groups.all()
+                if student_groups_qs.exists():
+                    print(f"DEBUG: Student groups found: {[g.name for g in student_groups_qs]}")
+                    # Фильтруем занятия по этим группам
+                    queryset = Lesson.objects.filter(group__in=student_groups_qs)
+                else:
+                    print("DEBUG: Student is not assigned to any group.")
+            elif user_role == 'TEACHER':
+                print("DEBUG: User role is TEACHER.")
+                queryset = Lesson.objects.filter(teacher=user)
+            elif user_role == 'PARENT':
+                print("DEBUG: User role is PARENT.")
+                 # Предполагаем, что у модели User есть поле/связь 'related_child' или 'parent_profile' со связью children
+                 # ЗАМЕНИТЕ 'related_children' на ВАШЕ реальное поле/related_name
+                children = getattr(user, 'related_children', None) # Пример, если M2M 'related_children' на User
+                if children and children.exists():
+                     children_qs = children.all()
+                     print(f"DEBUG: Parent children found: {[c.email for c in children_qs]}")
+                     # Получаем группы ВСЕХ детей родителя
+                     queryset = Lesson.objects.filter(group__students__in=children_qs)
+                else:
+                     print("DEBUG: Parent has no linked children.")
+            elif getattr(user, 'is_admin', False) or user.is_staff:
+                 print(f"DEBUG: User is admin/staff. Returning none for MySchedule.")
+                 queryset = Lesson.objects.none()
+                 # return queryset # Важно вернуть сразу, чтобы не делать лишние запросы
+            else:
+                 print(f"DEBUG: User role ('{user_role}') not handled or invalid for MySchedule.")
+                 queryset = Lesson.objects.none()
+        except AttributeError as e:
+             print(f"DEBUG: AttributeError accessing role/groups/children: {e}")
+             queryset = Lesson.objects.none()
+
+        # Оптимизация и distinct, если queryset не пустой
+        if queryset.exists():
+            queryset = queryset.select_related(
+                'subject', 'teacher', 'group', 'classroom',
+                'teacher__profile' # Оставляем, если UserSerializer использует профиль
+            ).distinct()
         else:
-            # Другие роли (или неполные данные) не видят расписание здесь
-            return Lesson.objects.none()
+            # Возвращаем пустой набор сразу, если базовая фильтрация не дала результатов
+             print(f"DEBUG [MyScheduleView]: Base queryset is empty for user {user.email}. Returning.")
+             return queryset
 
-        # Применяем фильтры даты из запроса (если их нет, можно показать текущий/следующий день)
-        start_date_str = self.request.query_params.get('start_date')
-        end_date_str = self.request.query_params.get('end_date')
-
-        if not start_date_str and not end_date_str:
-             # По умолчанию показываем занятия на сегодня
-             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-             today_end = today_start + timezone.timedelta(days=1)
-             queryset = queryset.filter(start_time__gte=today_start, start_time__lt=today_end)
-        else:
-             # Применяем фильтры, если они есть
-             # DjangoFilterBackend сделает это автоматически, если filterset_fields настроен
-             pass
-
-        return queryset
+        # Фильтрация по дате будет применена DjangoFilterBackend
+        print(f"DEBUG [MyScheduleView]: Returning base queryset for user {user.email} with {queryset.count()} potential lessons before date filtering.")
+        return queryset.order_by('start_time')
 
 # TODO: Представление для генерации расписания (GenerateScheduleView)
 # Это сложная задача, вероятно, требующая асинхронной обработки (Celery)

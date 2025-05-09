@@ -12,10 +12,10 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/news/', include('news.urls')),
     path('api/messaging/', include('messaging.urls')),
-    path('api/forum/', include('forum.urls')),
+    #path('api/forum/', include('forum.urls')),
     path('api/notifications/', include('notifications.urls')),
     # Эндпоинты API приложения monitor
-    path('api/monitor/', include('monitor.urls')),
+    #path('api/monitor/', include('monitor.urls')),
     path('api/users/', include('users.urls')), 
     # Эндпоинты для JWT аутентификации
     #path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

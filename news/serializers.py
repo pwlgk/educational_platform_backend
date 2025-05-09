@@ -30,10 +30,12 @@ class NewsCommentSerializer(serializers.ModelSerializer):
             'id', 'article', 'author', 'content', 'parent', 'created_at',
             'replies', 'likes_count', 'is_liked_by_current_user'
         )
-        read_only_fields = ('author', 'created_at', 'replies', 'likes_count', 'is_liked_by_current_user')
+        # Добавляем 'article' сюда, т.к. он устанавливается в save()
+        read_only_fields = ('id', 'author', 'created_at', 'replies', 'likes_count', 'is_liked_by_current_user', 'article')
         extra_kwargs = {
-            'article': {'write_only': True}, # Передаем ID статьи при создании
-            'parent': {'write_only': True, 'required': False, 'allow_null': True}, # ID родительского коммента
+            # Убираем 'article' отсюда, если добавили в read_only_fields
+            # 'article': {'write_only': True},
+            'parent': {'write_only': True, 'required': False, 'allow_null': True},
         }
 
     def get_replies(self, obj):

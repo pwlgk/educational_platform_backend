@@ -1,9 +1,11 @@
+# messaging/consumers.py
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.contrib.contenttypes.models import ContentType
 from .models import Chat, Message, ChatParticipant
-from .serializers import MessageSerializer
+# Используем сериализатор, чтобы получить готовые данные для отправки
+from .serializers import MessageSerializer, LimitedUserSerializer
 from users.models import User # Для асинхронного получения пользователя
 
 class ChatConsumer(AsyncWebsocketConsumer):
@@ -11,43 +13,76 @@ class ChatConsumer(AsyncWebsocketConsumer):
         super().__init__(*args, **kwargs)
         self.chat_id = None
         self.chat_group_name = None
-        self.user = None
+        self.user: User | None = None # Явно типизируем
 
     async def connect(self):
-        self.user = self.scope.get("user") # Получаем user из Auth Middleware (JWT или Session)
+        self.user = self.scope.get("user")
 
+        # --- Проверка аутентификации ---
         if not self.user or not self.user.is_authenticated:
-            await self.close(code=4001) # Или другой код для неавторизованных
+            print("WS Connect REJECTED: User not authenticated.")
+            await self.close(code=4001)
             return
 
-        # Получаем ID чата из URL
+        # --- Получение и проверка chat_id ---
         self.chat_id = self.scope['url_route']['kwargs'].get('chat_id')
         if not self.chat_id:
-             await self.close(code=4000) # Не указан ID чата
+             print("WS Connect REJECTED: chat_id missing in URL.")
+             await self.close(code=4000)
+             return
+        # Пробуем преобразовать в int для проверки
+        try:
+            chat_pk = int(self.chat_id)
+        except ValueError:
+             print(f"WS Connect REJECTED: Invalid chat_id format: {self.chat_id}")
+             await self.close(code=4000)
              return
 
-        # Проверяем, имеет ли пользователь доступ к этому чату (асинхронно)
-        has_access = await self.check_chat_access()
+        # --- Проверка доступа к чату (асинхронно) ---
+        has_access = await self.check_chat_access(chat_pk)
         if not has_access:
-            await self.close(code=4003) # Доступ запрещен
+            print(f"WS Connect REJECTED: User {self.user.id} has no access to chat {chat_pk}")
+            await self.close(code=4003)
             return
 
-        # Имя группы Channels для данного чата
+        # --- Присоединение к группе ---
         self.chat_group_name = f'chat_{self.chat_id}'
-
-        # Присоединяемся к группе чата
         await self.channel_layer.group_add(
             self.chat_group_name,
             self.channel_name
         )
 
+        # --- Принимаем соединение ---
         await self.accept()
-        print(f"User {self.user.id} connected to chat {self.chat_id}")
+        print(f"WS Connect ACCEPTED: User {self.user.id} connected to chat {self.chat_id} (channel: {self.channel_name})")
 
-        # Опционально: отправить предыдущие сообщения или статус подключения
+        # --- Опционально: Отправка события "пользователь онлайн" другим участникам ---
+        # user_serializer = LimitedUserSerializer(self.user) # Используем урезанный
+        # await self.channel_layer.group_send(
+        #     self.chat_group_name,
+        #     {
+        #         "type": "chat.user_status",
+        #         "user": user_serializer.data,
+        #         "status": "online",
+        #         "sender_channel_name": self.channel_name # Исключаем себя
+        #     }
+        # )
 
     async def disconnect(self, close_code):
-        print(f"User {self.user.id} disconnected from chat {self.chat_id}, code: {close_code}")
+        print(f"WS Disconnect: User {self.user.id if self.user else 'Unknown'} from chat {self.chat_id}, code: {close_code}")
+        # --- Опционально: Отправка события "пользователь оффлайн" ---
+        # if self.user and self.chat_group_name:
+        #     user_serializer = LimitedUserSerializer(self.user)
+        #     await self.channel_layer.group_send(
+        #         self.chat_group_name,
+        #         {
+        #             "type": "chat.user_status",
+        #             "user": user_serializer.data,
+        #             "status": "offline",
+        #             "sender_channel_name": self.channel_name
+        #         }
+        #     )
+
         # Покидаем группу чата
         if self.chat_group_name:
             await self.channel_layer.group_discard(
@@ -56,96 +91,119 @@ class ChatConsumer(AsyncWebsocketConsumer):
             )
 
     async def receive(self, text_data=None, bytes_data=None):
-        """Прием сообщения от WebSocket клиента."""
-        if not self.user or not self.user.is_authenticated:
-             return # Игнорируем сообщения от неавторизованных
+        """ Прием сообщения от клиента (для событий typing и, возможно, read). """
+        if not self.user or not self.user.is_authenticated: return
 
         try:
             data = json.loads(text_data)
-            message_content = data.get('message')
-            # TODO: Обработка загрузки файлов через WebSocket (сложнее)
+            message_type = data.get('type')
+            print(f"[WS Receive] Chat {self.chat_id}, User {self.user.id}: Received type '{message_type}' data: {data}")
 
-            if not message_content:
-                await self.send_error("Сообщение не может быть пустым.")
-                return
-
-            # Сохраняем сообщение в БД (асинхронно)
-            message_instance = await self.save_message(message_content)
-            if not message_instance:
-                 await self.send_error("Не удалось сохранить сообщение.")
-                 return
-
-            # Сериализуем сообщение для отправки клиентам
-            serializer = MessageSerializer(message_instance) # Контекст request здесь не нужен
-            message_data = serializer.data
-
-            # Отправляем сообщение всем в группе чата
-            await self.channel_layer.group_send(
-                self.chat_group_name,
-                {
-                    'type': 'chat_message', # Имя метода-обработчика
-                    'message': message_data,
-                    'sender_channel_name': self.channel_name # Чтобы не отправлять себе же (опционально)
-                }
-            )
+            if message_type == 'typing':
+                is_typing = data.get('is_typing', False)
+                # Рассылаем событие "typing" всем остальным в группе
+                user_serializer = LimitedUserSerializer(self.user) # Отправляем базовую инфу
+                await self.channel_layer.group_send(
+                    self.chat_group_name,
+                    {
+                        "type": "chat.typing", # Метод-обработчик ниже
+                        "user_id": self.user.id,
+                        "user_name": user_serializer.data.get('first_name', self.user.get_username()), # Используем имя или username/email
+                        "is_typing": is_typing,
+                        "sender_channel_name": self.channel_name # Исключаем себя
+                    }
+                )
+            # elif message_type == 'mark_read':
+                # Обработка отметки прочтения через WS (если нужно)
+                # message_id = data.get('message_id')
+                # await self.mark_message_as_read(message_id)
+                # await self.channel_layer.group_send(...) # Уведомляем остальных
+            else:
+                print(f"[WS Receive] Chat {self.chat_id}, User {self.user.id}: Unknown message type '{message_type}'")
+                # await self.send_error(f"Unknown message type: {message_type}") # Не шлем ошибку на неизвестный тип
 
         except json.JSONDecodeError:
-            await self.send_error("Неверный формат JSON.")
+            print(f"[WS Receive] Chat {self.chat_id}, User {self.user.id}: Invalid JSON")
+            # await self.send_error("Invalid JSON format.")
         except Exception as e:
-             print(f"Error processing message in chat {self.chat_id}: {e}")
-             await self.send_error(f"Ошибка обработки сообщения: {e}")
+             print(f"[WS Receive] Chat {self.chat_id}, User {self.user.id}: Error processing received message: {e}")
+             # await self.send_error(f"Error processing message: {e}")
 
+    # --- Методы-Обработчики для group_send ---
 
     async def chat_message(self, event):
-        """Отправка сообщения клиенту WebSocket."""
-        message = event['message']
-        # sender_channel = event.get('sender_channel_name')
+        """ Обработчик для отправки НОВОГО сообщения клиенту. """
+        message_data = event['message']
+        sender_channel = event.get('sender_channel_name')
 
-        # # Не отправляем сообщение обратно отправителю (если необходимо)
-        # if self.channel_name != sender_channel:
+        # НЕ отправляем сообщение обратно тому же клиенту, который его отправил через REST API
         await self.send(text_data=json.dumps({
-             'type': 'message',
-             'payload': message
-        }))
+                'type': 'chat.message', # Используем префикс chat. для ясности
+                'message': message_data
+            }))
+        # if self.channel_name != sender_channel:
+        #     await self.send(text_data=json.dumps({
+        #         'type': 'chat.message', # Используем префикс chat. для ясности
+        #         'message': message_data
+        #     }))
 
-    async def send_error(self, message):
-         """Отправка ошибки клиенту."""
+    async def chat_typing(self, event):
+        """ Обработчик для отправки статуса набора текста клиенту. """
+        sender_channel = event.get('sender_channel_name')
+        # Не отправляем событие typing себе же
+        if self.channel_name != sender_channel:
+            await self.send(text_data=json.dumps({
+                'type': 'chat.typing',
+                'user_id': event['user_id'],
+                'user_name': event['user_name'],
+                'is_typing': event['is_typing']
+            }))
+
+    async def chat_message_read(self, event):
+         """ Обработчик для отправки события прочтения сообщения клиенту. """
+         sender_channel = event.get('sender_channel_name')
+         # Не отправляем себе же уведомление о прочтении
+         if self.channel_name != sender_channel:
+             await self.send(text_data=json.dumps({
+                 'type': 'chat.message_read',
+                 'message_id': event['message_id'],
+                 'user_id': event['user_id'] # ID того, КТО прочитал
+             }))
+
+    async def chat_participant_update(self, event):
+         """ Обработчик для отправки обновленной информации о чате (участниках). """
+         # Отправляем всем, включая того, кто инициировал изменение
          await self.send(text_data=json.dumps({
-             'type': 'error',
-             'payload': {'message': message}
+             'type': 'chat.participant_update',
+             'chat': event['chat'] # Сериализованные данные чата
          }))
+
+    async def chat_system_message(self, event):
+         """ Обработчик для отправки системного сообщения (вошел/вышел). """
+         await self.send(text_data=json.dumps({
+             'type': 'chat.system_message',
+             'text': event['text']
+         }))
+
+
+    # --- Метод для отправки ошибки клиенту (если нужно) ---
+    # async def send_error(self, message):
+    #      await self.send(text_data=json.dumps({'type': 'error', 'message': message}))
 
     # --- Вспомогательные асинхронные методы ---
     @database_sync_to_async
-    def check_chat_access(self):
-        """Проверяет, является ли пользователь участником чата."""
+    def check_chat_access(self, chat_pk: int):
+        """ Проверяет, является ли self.user участником чата. """
+        if not self.user: return False
         try:
-             # Проверяем участие через ChatParticipant или ManyToMany
-             return Chat.objects.filter(pk=self.chat_id, participants=self.user).exists()
+             # Проверяем через промежуточную модель
+             return ChatParticipant.objects.filter(chat_id=chat_pk, user=self.user).exists()
+             # Или через M2M поле:
+             # return Chat.objects.filter(pk=chat_pk, participants=self.user).exists()
         except Exception as e:
-             print(f"Error checking chat access for user {self.user.id} and chat {self.chat_id}: {e}")
+             print(f"Error checking chat access for user {self.user.id} and chat {chat_pk}: {e}")
              return False
 
-    @database_sync_to_async
-    def save_message(self, content, file=None):
-        """Сохраняет сообщение в БД."""
-        try:
-            chat = Chat.objects.get(pk=self.chat_id)
-            # Убедимся еще раз, что отправитель - участник
-            if not chat.participants.filter(pk=self.user.pk).exists():
-                 print(f"Attempt to save message from non-participant user {self.user.id} in chat {self.chat_id}")
-                 return None # Не сохраняем
-
-            message = Message.objects.create(
-                chat=chat,
-                sender=self.user,
-                content=content
-                # file=file # Добавить обработку файла, если нужно
-            )
-            return message
-        except Chat.DoesNotExist:
-             print(f"Chat {self.chat_id} not found for saving message.")
-             return None
-        except Exception as e:
-             print(f"Error saving message for user {self.user.id} in chat {self.chat_id}: {e}")
-             return None
+    # save_message больше не нужен здесь, сохранение идет через REST API
+    # @database_sync_to_async
+    # def save_message(self, content, file=None): ...

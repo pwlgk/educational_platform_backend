@@ -10,7 +10,7 @@ class Chat(models.Model):
         GROUP = 'GROUP', _('Групповой чат')
 
     chat_type = models.CharField(_('тип чата'), max_length=10, choices=ChatType.choices)
-    name = models.CharField(_('название чата'), max_length=150, blank=True, help_text=_("Обязательно для групповых чатов"))
+    name = models.CharField(_('название чата'), max_length=150, blank=True, null=True, help_text=_("Обязательно для групповых чатов"))
     participants = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
         through='ChatParticipant', # Используем промежуточную модель
@@ -80,12 +80,18 @@ class Message(models.Model):
     file = models.FileField(_('файл'), upload_to=chat_file_upload_path, null=True, blank=True)
     timestamp = models.DateTimeField(_('время отправки'), auto_now_add=True, db_index=True)
 
+    mime_type = models.CharField(_('MIME тип'), max_length=100, null=True, blank=True, db_index=True) # Индексируем для фильтрации
+    file_size = models.PositiveBigIntegerField(_('размер файла'), null=True, blank=True)
+    original_filename = models.CharField(_('исходное имя файла'), max_length=255, null=True, blank=True)
+
+
     class Meta:
         verbose_name = _('сообщение')
         verbose_name_plural = _('сообщения')
         ordering = ['timestamp'] # Сначала старые сообщения
         indexes = [
             models.Index(fields=['chat', 'timestamp']),
+            models.Index(fields=['chat', 'mime_type']),
         ]
 
     def __str__(self):
@@ -98,8 +104,32 @@ class Message(models.Model):
             raise ValidationError(_('Сообщение должно содержать текст или прикрепленный файл.'))
 
     def save(self, *args, **kwargs):
-        created = self.pk is None # Проверяем, создается ли объект
+        created = self.pk is None
+        # --- ИЗВЛЕКАЕМ МЕТАДАННЫЕ ПЕРЕД СОХРАНЕНИЕМ ---
+        if self.file and not self.mime_type: # Заполняем только если не заполнены
+            try:
+                self.mime_type = self.file.file.content_type
+            except AttributeError:
+                # Старые версии Django или другой бэкенд хранения могут не иметь content_type
+                import mimetypes
+                mime_type, _ = mimetypes.guess_type(self.file.name)
+                self.mime_type = mime_type
+            except Exception as e:
+                 print(f"Warning: Could not determine mime_type for {self.file.name}: {e}")
+
+        if self.file and not self.file_size:
+            try:
+                self.file_size = self.file.size
+            except Exception as e:
+                 print(f"Warning: Could not determine file_size for {self.file.name}: {e}")
+
+        if self.file and not self.original_filename:
+             try:
+                 # Берем имя из объекта файла
+                 self.original_filename = self.file.name.split('/')[-1] # Убираем путь, если есть
+             except Exception as e:
+                  print(f"Warning: Could not determine original_filename for {self.file.name}: {e}")
+        
         super().save(*args, **kwargs)
-        # Обновляем last_message в чате после сохранения нового сообщения
         if created:
             Chat.objects.filter(pk=self.chat_id).update(last_message=self)

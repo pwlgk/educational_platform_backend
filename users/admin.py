@@ -23,8 +23,15 @@ class CustomUserAdmin(BaseUserAdmin):
         ('Personal info', {'fields': ('first_name', 'last_name', 'patronymic')}),
         ('Permissions', {'fields': ('role', 'is_active', 'is_staff', 'is_superuser', 'is_role_confirmed', 'groups', 'user_permissions')}),
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
-        ('Relations', {'fields': ('invited_by', 'related_child')}), # Добавили связи
-    )
+('Relationships', {
+            'fields': (
+                'invited_by',
+                'parents', # <-- НОВОЕ ПОЛЕ ДЛЯ СТУДЕНТА (выбираем родителей)
+                # 'children', # Это обратная связь, ее лучше не редактировать напрямую здесь,
+                             # а управлять через поле 'parents' у студента.
+                             # Если очень нужно, используйте filter_horizontal или filter_vertical
+            )
+        }),    )
     # Поля, отображаемые при создании пользователя
     add_fieldsets = (
         (None, {

@@ -10,6 +10,7 @@ router.register(r'chats', views.ChatViewSet, basename='chat')
 # URL будет /api/messaging/chats/{chat_pk}/messages/
 chats_router = routers.NestedDefaultRouter(router, r'chats', lookup='chat')
 chats_router.register(r'messages', views.MessageViewSet, basename='chat-messages')
+chats_router.register(r'media', views.ChatMediaViewSet, basename='chat-media')
 
 urlpatterns = [
     path('', include(router.urls)),

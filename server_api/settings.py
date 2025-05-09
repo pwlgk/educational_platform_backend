@@ -145,6 +145,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated', # Требовать аутентификацию по умолчанию
     ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema', # Для Swagger/OpenAPI
+    
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend']
     # 'DEFAULT_THROTTLING_CLASSES': [ # Ограничение частоты запросов (рекомендуется для продакшена)
     #     'rest_framework.throttling.AnonRateThrottle',
@@ -231,4 +232,64 @@ CHANNEL_LAYERS = {
             "hosts": [(REDIS_HOST, REDIS_PORT)], # Используем имя сервиса 'redis'
         },
     },
+}
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False, # Важно, чтобы не отключить логгеры Django/DRF
+    'formatters': { # Формат вывода логов
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': { # Куда выводить логи
+        'console': {
+            'level': 'DEBUG', # <-- Уровень для обработчика консоли
+            'class': 'logging.StreamHandler', # Вывод в консоль (stderr)
+            'formatter': 'simple', # Используем простой формат
+        },
+        # Можно добавить обработчик для файла:
+        # 'file': {
+        #     'level': 'DEBUG',
+        #     'class': 'logging.FileHandler',
+        #     'filename': BASE_DIR / 'django_debug.log', # Путь к файлу логов
+        #     'formatter': 'verbose',
+        # },
+    },
+    'loggers': { # Настройка конкретных логгеров
+        'django': { # Логгер Django
+            'handlers': ['console'],
+            'level': 'INFO', # Оставляем INFO для Django, чтобы не засорять вывод
+            'propagate': True,
+        },
+        'django.request': { # Логгер запросов Django
+             'handlers': ['console'],
+             'level': 'WARNING', # Повышаем уровень для запросов, чтобы видеть ошибки 4xx/5xx
+             'propagate': False, # Не передавать выше, чтобы не дублировать
+         },
+        'users': { # Логгер вашего приложения 'users'
+            'handlers': ['console'],
+            'level': 'DEBUG', # <-- Устанавливаем DEBUG для вашего приложения
+            'propagate': False, # Не передавать выше, если не нужно
+        },
+        'news': { # Логгер вашего приложения 'news' (добавьте по аналогии)
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+         # Можно настроить корневой логгер, если не указаны логгеры приложений
+         # '': {
+         #     'handlers': ['console'],
+         #     'level': 'DEBUG',
+         # },
+    }
 }

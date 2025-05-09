@@ -1,8 +1,23 @@
+import os
+from venv import logger
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 import uuid # Для токенов подтверждения
+
+
+def get_avatar_upload_path(instance, filename):
+    """
+    Генерирует уникальный путь для загрузки аватара: avatars/user_{id}/{uuid}.{ext}
+    """
+    ext = filename.split('.')[-1] # Получаем расширение файла
+    # Генерируем уникальное имя файла с использованием UUID
+    unique_filename = f"{uuid.uuid4()}.{ext}"
+    # Формируем путь: avatars/user_123/xxxxx-xxxx-xxxx-xxxx.jpg
+    # Это помогает организовать файлы по пользователям
+    return os.path.join('avatars', f'user_{instance.user.id}', unique_filename)
+
 
 # --- Менеджер кастомного пользователя ---
 class CustomUserManager(BaseUserManager):
@@ -81,16 +96,15 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Связь Родитель -> Студент (упрощенная, для примера).
     # В реальном приложении может потребоваться ManyToMany или отдельная модель связи.
     # Убедитесь, что используется related_name, чтобы избежать конфликтов.
-    related_child = models.ForeignKey(
+    parents = models.ManyToManyField(
         'self',
-        on_delete=models.SET_NULL,
-        null=True,
+        symmetrical=False, # Связь не симметрична (Родитель != Студент)
+        related_name='children', # Обратная связь: user.children.all() вернет детей родителя
         blank=True,
-        related_name='related_parents',
-        limit_choices_to={'role': Role.STUDENT},
-        verbose_name=_('связанный ребенок (для роли Родитель)')
-    )
-
+        # Ограничиваем выбор для этого поля только пользователями с ролью PARENT
+        limit_choices_to={'role': Role.PARENT},
+        verbose_name=_('Родители (для Студента)'))
+    
     objects = CustomUserManager()
 
     USERNAME_FIELD = 'email' # Используем email для входа
@@ -134,19 +148,84 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 # --- Модель профиля пользователя ---
 class Profile(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile', verbose_name=_('пользователь'))
-    avatar = models.ImageField(_('аватар'), upload_to='avatars/', null=True, blank=True)
-    phone_number = models.CharField(_('номер телефона'), max_length=20, blank=True)
-    bio = models.TextField(_('о себе'), blank=True)
-    date_of_birth = models.DateField(_('дата рождения'), null=True, blank=True)
+    # Связь с пользователем один-к-одному
+    user = models.OneToOneField(
+        User, # Используем настройку Django
+        on_delete=models.CASCADE, # При удалении User удаляется и Profile
+        related_name='profile',   # Имя для обратной связи User.profile
+        primary_key=True,         # Делаем user первичным ключом для оптимизации
+        verbose_name=_('пользователь')
+    )
+    # Поле для аватара
+    avatar = models.ImageField(
+        _('аватар'),
+        upload_to=get_avatar_upload_path, # Функция для генерации пути
+        null=True,    # Разрешаем NULL в базе данных
+        blank=True,   # Разрешаем пустое значение в формах/админке
+        help_text=_('User profile picture') # Подсказка для админки
+    )
+    # Другие поля профиля
+    phone_number = models.CharField(
+        _('номер телефона'),
+        max_length=20,
+        blank=True, # Поле необязательно для заполнения
+        help_text=_('Contact phone number (optional)')
+    )
+    bio = models.TextField(
+        _('о себе'),
+        blank=True, # Поле необязательно для заполнения
+        help_text=_('A short biography (optional)')
+    )
+    date_of_birth = models.DateField(
+        _('дата рождения'),
+        null=True,   # Разрешаем NULL в базе данных
+        blank=True,  # Разрешаем пустое значение в формах/админке
+        help_text=_('Date of birth (optional)')
+    )
     # Добавьте другие поля профиля по необходимости
+    # Например:
+    # website = models.URLField(max_length=200, blank=True)
+    # location = models.CharField(max_length=100, blank=True)
 
     class Meta:
         verbose_name = _('профиль')
         verbose_name_plural = _('профили')
 
     def __str__(self):
+        # Строковое представление объекта
         return f"Профиль {self.user.email}"
+
+    # Метод save переопределен для удаления старого файла перед сохранением нового
+    def save(self, *args, **kwargs):
+        # Проверяем, есть ли у объекта первичный ключ (т.е. он уже сохранен в базе)
+        if self.pk:
+            try:
+                # Получаем старую версию объекта из базы данных
+                old_self = Profile.objects.get(pk=self.pk)
+                # Сравниваем старый файл с новым
+                # Если новый файл есть (не None) и он отличается от старого
+                if old_self.avatar and self.avatar != old_self.avatar:
+                    # И если у старого файла есть имя (он реально существовал)
+                    if old_self.avatar.name:
+                        logger.debug(f"[PROFILE SAVE] Deleting old avatar file before saving new: {old_self.avatar.name}")
+                        # Удаляем старый файл с диска
+                        old_self.avatar.delete(save=False)
+            except Profile.DoesNotExist:
+                # Этого не должно произойти для существующего pk, но на всякий случай
+                logger.warning(f"[PROFILE SAVE] Could not find old profile with pk={self.pk} during pre-save check.")
+                pass # Продолжаем сохранение
+        # Вызываем оригинальный метод save модели Django
+        super().save(*args, **kwargs)
+
+    # Метод delete переопределен для удаления файла при удалении объекта Profile
+    def delete(self, *args, **kwargs):
+         # Удаляем файл аватара перед удалением самой записи из базы
+         if self.avatar and self.avatar.name:
+              logger.debug(f"[PROFILE DELETE] Deleting avatar file: {self.avatar.name}")
+              self.avatar.delete(save=False) # save=False, т.к. объект все равно удалится
+         # Вызываем оригинальный метод delete
+         super().delete(*args, **kwargs)
+
 
 # --- Модель кодов приглашения ---
 class InvitationCode(models.Model):

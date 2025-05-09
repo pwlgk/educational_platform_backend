@@ -55,6 +55,13 @@ class Classroom(models.Model):
         PRACTICE = 'PRACTICE', _('Практическая')
         LAB = 'LAB', _('Лаборатория')
         COMPUTER = 'COMPUTER', _('Компьютерный класс')
+        SCIENCE = 'SCIENCE', _('Кабинет химии/физики/биологии')
+        LANGUAGE = 'LANGUAGE', _('Кабинет иностранных языков')
+        MUSIC = 'MUSIC', _('Кабинет музыки')
+        ART = 'ART', _('Кабинет ИЗО/творчества')
+        GYM = 'GYM', _('Спортзал')
+        AUDITORIUM = 'AUDITORIUM', _('Актовый зал')
+        ADMIN = 'ADMIN', _('Административный кабинет')
         OTHER = 'OTHER', _('Другое')
 
     identifier = models.CharField(_('номер/название'), max_length=50, unique=True) # Напр., "305", "Лекц. А"
@@ -79,6 +86,11 @@ class Lesson(models.Model):
         LAB = 'LAB', _('Лабораторная работа')
         EXAM = 'EXAM', _('Экзамен/Зачет')
         CONSULTATION = 'CONSULTATION', _('Консультация')
+        CLASS = 'CLASS', _('Урок')
+        HOMEROOM = 'HOMEROOM', _('Классный час')
+        EXTRA = 'EXTRA', _('Факультатив / Внеурочное занятие')
+        SPORT = 'SPORT', _('Физкультура')
+        ART = 'ART', _('ИЗО / Музыка / Творчество')
         OTHER = 'OTHER', _('Другое')
 
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='lessons', verbose_name=_('предмет'))
