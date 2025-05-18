@@ -10,13 +10,11 @@ from django.contrib.auth import get_user_model
 
 # Импортируем нужные модели в начале файла, если это возможно
 # Если возникают циклические зависимости, импортируйте внутри функций
-# --- ИСПРАВЛЕНИЕ: Добавляем импорты ---
 from django.db.models import Model # Для type hinting
 from messaging.models import Chat, Message
 from news.models import NewsArticle # Предполагаем, что модель новостей здесь
-from schedule.models import Lesson # Предполагаем, что модель занятий здесь
+from edu_core.models import Lesson # Предполагаем, что модель занятий здесь
 # from forum.models import Post # Если есть форум
-# --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 from .models import Notification, UserNotificationSettings # Убедитесь, что путь верный
 from .serializers import NotificationSerializer
 
@@ -25,7 +23,7 @@ User = get_user_model()
 logger = logging.getLogger(__name__) # <-- Инициализируем логгер
 
 def send_notification(
-    recipient: User,
+    recipient: User, # type: ignore
     message: str,
     notification_type: str, # Используем строковый тип для NotificationType
     related_object: Model | None = None # Используем базовый Model для type hinting

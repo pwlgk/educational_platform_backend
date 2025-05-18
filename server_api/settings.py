@@ -38,12 +38,14 @@ INSTALLED_APPS = [
     'drf_spectacular',
     'users',
     'monitor',
-    'schedule',
+    #'schedule',
     'news',
     'messaging',
     'forum',
     'notifications',
     'core',
+    #'academics',
+    'edu_core',
     
     
 ]
@@ -84,13 +86,23 @@ WSGI_APPLICATION = 'server_api.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'test_db',
+        'USER': 'test_user',
+        'PASSWORD': 'test_pass',
+        'HOST': 'localhost',
+        'PORT': '5433',
     }
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -203,12 +215,11 @@ CORS_ALLOW_ALL_ORIGINS = True # Для разработки. В продакше
 
 # --- Настройки drf-spectacular ---
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'Server Monitoring API',
-    'DESCRIPTION': 'API для мониторинга и управления сервером',
+    'TITLE': 'Educational Platform API',
+    'DESCRIPTION': 'API для образовательной платформы',
     'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False, # Не показывать схему OpenAPI в UI по умолчанию
-    # Дополнительные настройки...
-    'COMPONENT_SPLIT_REQUEST': True, # Разделять параметры запроса в Swagger UI
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
 }
 
 # --- Настройки Мониторинга ---

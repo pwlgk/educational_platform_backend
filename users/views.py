@@ -115,7 +115,7 @@ class AdminUserViewSet(viewsets.ModelViewSet): # <-- ИЗМЕНЕНО на Model
     Позволяет просматривать, редактировать (роль, статус, связи) пользователей.
     """
     queryset = User.objects.select_related('profile').prefetch_related('parents', 'children').all().order_by('id') # Добавил prefetch_related
-    permission_classes = [IsAdminUser] # Только админ может управлять всеми пользователями
+    permission_classes = [IsTeacherOrAdmin] # Только админ может управлять всеми пользователями
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['email', 'first_name', 'last_name']
     filterset_fields = ['role', 'is_active', 'is_role_confirmed']
