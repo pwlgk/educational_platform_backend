@@ -1,351 +1,397 @@
-# messaging/views.py
+from typing import Optional
 from rest_framework import viewsets, permissions, status, generics
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
-from django.db.models import Max, Q, Count # Добавляем Count
+from django.db.models import Max, Q, Count
 from django.contrib.auth import get_user_model
-from rest_framework.exceptions import PermissionDenied, ValidationError # Импортируем ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
+
+from users.models import User
 from .models import Chat, Message, ChatParticipant
-# Убедитесь, что импортируете ВСЕ нужные сериализаторы
 from .serializers import ChatSerializer, MediaMessageSerializer, MessageSerializer, MarkReadSerializer
-from users.permissions import IsAdmin # Используем пермишен (если он нужен)
-from .filters import ChatMediaFilter # Импортируем фильтр
-from rest_framework.pagination import LimitOffsetPagination 
+from .permissions import IsChatCreatorOrAdmin, IsChatParticipant
+from .filters import ChatMediaFilter
+from rest_framework.pagination import LimitOffsetPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
-# Импорты для Channels
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 import logging
+from notifications.utils import notify_added_to_chat, notify_removed_from_chat
+from notifications.models import Notification
+
 logger = logging.getLogger(__name__)
 
-User = get_user_model()
 
+# Класс ChatMediaPagination определяет кастомную пагинацию для списка медиафайлов в чате.
+# Наследуется от LimitOffsetPagination.
+# - default_limit: Количество элементов на странице по умолчанию (30).
+# - max_limit: Максимальное количество элементов на странице, которое может запросить клиент (200).
 class ChatMediaPagination(LimitOffsetPagination):
-    default_limit = 30 # Количество медиа на странице по умолчанию
-    max_limit = 100    # Максимальное количество
+    default_limit = 30
+    max_limit = 200
 
+# Класс ChatMediaViewSet предоставляет эндпоинты только для чтения (ReadOnlyModelViewSet)
+# для получения списка медиафайлов (сообщений с файлами) в конкретном чате.
+# - serializer_class: Использует MediaMessageSerializer для отображения сообщений с медиа.
+# - permission_classes: Требует аутентификации пользователя (IsAuthenticated).
+# - pagination_class: Использует кастомную пагинацию ChatMediaPagination.
+# - filter_backends: Включает DjangoFilterBackend для фильтрации по типу медиа и OrderingFilter для сортировки.
+# - filterset_class: Использует ChatMediaFilter для определения доступных фильтров.
+# - ordering_fields: Поля, по которым можно сортировать (только 'timestamp').
+# - ordering: Сортировка по умолчанию (по убыванию 'timestamp', т.е. сначала новые).
+# Метод get_queryset:
+#   1. Получает 'chat_pk' из URL.
+#   2. Проверяет, является ли запрашивающий пользователь участником данного чата. Если нет, выбрасывает PermissionDenied.
+#   3. Возвращает QuerySet сообщений из указанного чата, у которых есть прикрепленный файл (file не null и не пустая строка),
+#      с предзагрузкой профиля отправителя.
+# Метод get_serializer_context добавляет объект request в контекст сериализатора,
+# что необходимо для формирования полных URL для файлов.
 class ChatMediaViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    Предоставляет доступ к списку медиа и файлов для конкретного чата.
-    URL: /api/messaging/chats/{chat_pk}/media/
-    """
-    serializer_class = MediaMessageSerializer # Используем урезанный сериализатор
+    serializer_class = MediaMessageSerializer
     permission_classes = [permissions.IsAuthenticated]
-    pagination_class = ChatMediaPagination # Включаем пагинацию
+    pagination_class = ChatMediaPagination
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_class = ChatMediaFilter # Используем наш фильтр по типу
+    filterset_class = ChatMediaFilter
     ordering_fields = ['timestamp']
-    ordering = ['-timestamp'] # Сначала новые
+    ordering = ['-timestamp']
 
     def get_queryset(self):
-        """ Возвращает только сообщения с файлами для указанного чата. """
         chat_pk = self.kwargs.get('chat_pk')
         if not chat_pk: return Message.objects.none()
-
-        # Проверяем доступ пользователя к чату
         try:
+            # Проверка, что пользователь является участником чата
             if not ChatParticipant.objects.filter(chat_id=chat_pk, user=self.request.user).exists():
                 raise PermissionDenied("Вы не являетесь участником этого чата.")
-        except ValueError:
+        except ValueError: # Если chat_pk не может быть преобразован в int
              raise ValidationError("Неверный ID чата.")
-
-        # Фильтруем сообщения: должен быть файл и принадлежать чату
         return Message.objects.filter(
             chat_id=chat_pk,
-            file__isnull=False # Убираем сообщения без файлов
+            file__isnull=False
         ).exclude(
-            file='' # Исключаем записи с пустым путем к файлу (на всякий случай)
-        ).select_related('sender__profile') # Подгружаем автора и профиль
+            file=''
+        ).select_related('sender__profile') # Оптимизация запроса
 
     def get_serializer_context(self):
-        # Передаем request в контекст для генерации file_url
         context = super().get_serializer_context()
-        context['request'] = self.request
+        context['request'] = self.request # Для build_absolute_uri в сериализаторе
         return context
 
+# Класс ChatViewSet предоставляет полный CRUD-функционал (ModelViewSet) для управления чатами.
+# - serializer_class: Использует ChatSerializer.
+# - permission_classes (базовый): Требует аутентификации пользователя.
+# Метод get_queryset:
+#   - Возвращает QuerySet чатов, в которых участвует текущий аутентифицированный пользователь.
+#   - Выполняет предзагрузку связанных данных (participants, last_message, created_by) для оптимизации.
+#   - Аннотирует каждый чат временем последнего сообщения (`last_message_ts`) для сортировки.
+#   - Сортирует чаты по времени последнего сообщения (сначала новые), затем по дате создания.
+# Метод get_permissions динамически назначает разрешения в зависимости от действия:
+#   - update, partial_update, destroy: IsChatCreatorOrAdmin (только создатель чата или админ).
+#   - add_participant, remove_participant_by_admin: IsChatCreatorOrAdmin.
+#   - leave_chat: IsChatParticipant (любой участник чата может его покинуть).
+#   - mark_read, retrieve: IsChatParticipant (любой участник может прочитать и просмотреть чат).
+# Кастомные действия (@action):
+#   - add_participant: Позволяет создателю чата или админу добавлять нового участника в групповой чат.
+#     Отправляет уведомление добавленному пользователю и системное сообщение в чат.
+#   - remove_participant_by_admin: Позволяет создателю чата или админу удалять участника из группового чата.
+#     Отправляет системное сообщение в чат и уведомление удаленному пользователю.
+#   - leave_chat: Позволяет текущему пользователю покинуть групповой чат. Если пользователь был последним
+#     участником, чат удаляется. Отправляет системное сообщение в чат.
+#   - mark_read: Позволяет текущему пользователю отметить все сообщения в чате как прочитанные
+#     (обновляет last_read_message). Отправляет WebSocket-уведомление `message.read_receipt`
+#     в группу чата и `chat_unread_update` в личный канал пользователя для обновления счетчика непрочитанных.
+# Вспомогательные методы:
+#   - notify_participants: Отправляет WebSocket-уведомление (обычное или системное сообщение)
+#     всем участникам указанного чата через Channels.
+#   - notify_user_unread_update: Отправляет WebSocket-уведомление конкретному пользователю
+#     об изменении количества непрочитанных сообщений в указанном чате.
 class ChatViewSet(viewsets.ModelViewSet):
-    """Управление чатами (список, создание, детали)."""
     serializer_class = ChatSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        """ Пользователь видит только те чаты, в которых он участвует. """
         if not self.request.user.is_authenticated:
             return Chat.objects.none()
-        # Оптимизация: prefetch_related для участников и select_related для автора последнего сообщения
+        # Получаем чаты, где пользователь является участником
         return self.request.user.chats.prefetch_related(
-            'participants__profile', # Подгружаем профили участников
-            'last_message__sender__profile' # Подгружаем профиль отправителя последнего сообщения
-        ).annotate( # Аннотируем время последнего сообщения для сортировки
-            last_message_ts=Max('messages__timestamp')
-        ).distinct().order_by('-last_message_ts', '-created_at') # Сортируем по последнему сообщению, затем по дате создания
+            'participants__profile', # Для отображения аватаров участников
+            'last_message__sender__profile', # Для аватара отправителя последнего сообщения
+            'created_by__profile'
+        ).select_related(
+            'last_message', # Для деталей последнего сообщения
+            'created_by'    # Для информации о создателе чата
+        ).annotate(
+            last_message_ts=Max('messages__timestamp') # Для сортировки по последнему сообщению
+        ).distinct().order_by('-last_message_ts', '-created_at')
 
-    # perform_create больше не нужен, логика перенесена в ChatSerializer.create
-    # def perform_create(self, serializer):
-    #     serializer.save(created_by=self.request.user) # Передаем создателя
+    def get_permissions(self):
+        # Динамическое назначение разрешений в зависимости от действия
+        if self.action in ['update', 'partial_update', 'destroy']:
+            self.permission_classes = [permissions.IsAuthenticated, IsChatCreatorOrAdmin]
+        elif self.action in ['add_participant', 'remove_participant_by_admin']:
+            self.permission_classes = [permissions.IsAuthenticated, IsChatCreatorOrAdmin]
+        elif self.action == 'leave_chat':
+            self.permission_classes = [permissions.IsAuthenticated, IsChatParticipant]
+        elif self.action in ['mark_read', 'retrieve']: # retrieve - просмотр деталей чата
+            self.permission_classes = [permissions.IsAuthenticated, IsChatParticipant]
+        # Для 'create' и 'list' используются разрешения по умолчанию (IsAuthenticated)
+        return super().get_permissions()
 
-    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    @action(detail=True, methods=['post'], url_path='add_participant')
     def add_participant(self, request, pk=None):
-        """ Добавляет участника в групповой чат. """
-        chat = self.get_object() # Получаем чат, get_queryset уже проверил участие текущего юзера
-
-        # Проверка прав: Только админ может добавлять участников
-        if not request.user.is_admin: # Используем ваш флаг is_admin
-             raise PermissionDenied("Только администратор может добавлять участников.")
-
+        chat = self.get_object() # Проверка прав доступа уже выполнена get_permissions
         if chat.chat_type == Chat.ChatType.PRIVATE:
             return Response({'error': 'Нельзя добавить участников в личный чат.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # --- ИСПРАВЛЕНИЕ: Ожидаем user_id ---
         user_id = request.data.get('user_id')
         if not user_id:
             return Response({'error': 'Необходимо указать "user_id".'}, status=status.HTTP_400_BAD_REQUEST)
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
         try:
             user_to_add = User.objects.get(pk=user_id)
-
-            # Используем модель ChatParticipant для добавления
             participant, created = ChatParticipant.objects.get_or_create(user=user_to_add, chat=chat)
-
             if not created:
                  return Response({'detail': 'Пользователь уже в чате.'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # TODO: Отправить уведомление через WebSocket
-            self.notify_participants(chat, f'User {user_to_add.get_full_name() or user_to_add.email} joined the chat.', system=True)
+            notify_added_to_chat(chat, user_to_add) # Уведомление через систему Notification
+            notification_text_for_others = f'Пользователь {user_to_add.get_full_name() or user_to_add.email} присоединился к чату.'
+            self.notify_participants(chat, notification_text_for_others, system=True, exclude_user=user_to_add) # WS уведомление в чат
 
-            # Возвращаем обновленный чат
-            # Пере-сериализуем, чтобы включить обновленный список участников
-            serializer = self.get_serializer(chat)
+            serializer = self.get_serializer(chat) # Возвращаем обновленные данные чата
             return Response(serializer.data, status=status.HTTP_200_OK)
-
         except User.DoesNotExist:
             return Response({'error': 'Пользователь не найден.'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-             print(f"Error adding participant to chat {pk}: {e}") # Логируем ошибку
+             logger.error(f"Error adding participant to chat {pk}: {e}", exc_info=True)
              return Response({'error': f'Ошибка добавления участника: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
-    def remove_participant(self, request, pk=None):
-        """ Удаляет участника из группового чата. """
+    @action(detail=True, methods=['post'], url_path='remove_participant')
+    def remove_participant_by_admin(self, request, pk=None):
         chat = self.get_object()
-
-        # Проверка прав: Только админ может удалять
-        if not request.user.is_admin:
-            raise PermissionDenied("Только администратор может удалять участников.")
-
         if chat.chat_type == Chat.ChatType.PRIVATE:
              return Response({'error': 'Нельзя удалять участников из личного чата.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # --- ИСПРАВЛЕНИЕ: Ожидаем user_id ---
-        user_id_to_remove = request.data.get('user_id')
-        if not user_id_to_remove:
-            return Response({'error': 'Необходимо указать "user_id".'}, status=status.HTTP_400_BAD_REQUEST)
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
-        # Запрет удаления самого себя через этот эндпоинт
-        if str(request.user.id) == str(user_id_to_remove):
-             return Response({'error': 'Используйте действие "Покинуть чат".'}, status=status.HTTP_400_BAD_REQUEST)
-
+        user_id_to_remove_str = request.data.get('user_id')
+        if not user_id_to_remove_str:
+            return Response({'error': 'Необходимо указать "user_id" удаляемого участника.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            user_id_to_remove = int(user_id_to_remove_str)
+        except ValueError:
+            return Response({'error': 'Неверный формат "user_id".'}, status=status.HTTP_400_BAD_REQUEST)
+        current_user = request.user
+        if current_user.id == user_id_to_remove: # Админ не может удалить сам себя этим методом
+             return Response({'error': 'Чтобы покинуть чат, используйте действие "Покинуть чат".'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             user_to_remove = User.objects.get(pk=user_id_to_remove)
+            participant_to_remove = ChatParticipant.objects.filter(chat=chat, user=user_to_remove).first()
+            if not participant_to_remove:
+                return Response({'error': 'Указанный пользователь не является участником этого чата.'}, status=status.HTTP_404_NOT_FOUND)
+            
+            participant_to_remove.delete()
 
-            # Используем ChatParticipant для удаления
-            deleted_count, _ = ChatParticipant.objects.filter(chat=chat, user=user_to_remove).delete()
+            notification_text_for_others = f'Пользователь {user_to_remove.get_full_name() or user_to_remove.email} был удален из чата администратором.'
+            self.notify_participants(chat, notification_text_for_others, system=True, exclude_user=user_to_remove)
+            notify_removed_from_chat(chat, user_to_remove, actor=current_user)
 
-            if deleted_count == 0:
-                 return Response({'error': 'Пользователь не найден в этом чате.'}, status=status.HTTP_404_NOT_FOUND)
-
-            # Проверка на удаление последнего участника (не должна произойти, если есть админ)
-            if chat.participants.count() == 0:
-                 print(f"Warning: Last participant removed from chat {pk}. Consider deleting the chat.")
-                 # Можно добавить логику удаления пустого чата здесь или в другом месте
-
-            # TODO: Отправить уведомление через WebSocket
-            self.notify_participants(chat, f'User {user_to_remove.get_full_name() or user_to_remove.email} left the chat.', system=True)
-
-            # Возвращаем обновленный чат
-            serializer = self.get_serializer(chat)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(status=status.HTTP_204_NO_CONTENT)
         except User.DoesNotExist:
-             return Response({'error': 'Удаляемый пользователь не найден.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Удаляемый пользователь не найден.'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-             print(f"Error removing participant from chat {pk}: {e}")
+             logger.error(f"Error removing participant {user_id_to_remove} by admin from chat {pk}: {e}", exc_info=True)
              return Response({'error': f'Ошибка удаления участника: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    @action(detail=True, methods=['post'], url_path='mark-read', permission_classes=[permissions.IsAuthenticated])
-    def mark_read(self, request, pk=None):
-        """ Отмечает чат как прочитанный текущим пользователем до последнего сообщения. """
-        # Получаем чат, проверяя участие пользователя через get_queryset
-        chat = get_object_or_404(self.get_queryset(), pk=pk)
-        logger.debug(f"MarkRead View: Attempting for chat {pk}, user {request.user.id}")
+    @action(detail=True, methods=['post'], url_path='leave')
+    def leave_chat(self, request, pk=None):
+        chat = self.get_object()
+        if chat.chat_type == Chat.ChatType.PRIVATE:
+             return Response({'error': 'Нельзя покинуть личный чат таким образом.'}, status=status.HTTP_400_BAD_REQUEST)
+        current_user = request.user
+        try:
+            participant_entry = ChatParticipant.objects.filter(chat=chat, user=current_user).first()
+            if not participant_entry:
+                return Response({'error': 'Вы не являетесь участником этого чата.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Используем сериализатор MarkReadSerializer
+            chat_name_for_notification = chat.name or "Групповой чат"
+            is_last_participant = (chat.participants.count() == 1 and participant_entry.user == current_user)
+            participant_entry.delete()
+
+            if is_last_participant:
+                logger.info(f"User {current_user.id} is the last participant leaving chat {pk}. Deleting chat.")
+                chat.delete()
+                return Response({'status': f'Вы покинули чат "{chat_name_for_notification}", и он был удален как пустой.'}, status=status.HTTP_204_NO_CONTENT)
+            else:
+                notification_text_for_others = f'Пользователь {current_user.get_full_name() or current_user.email} покинул(а) чат.'
+                self.notify_participants(chat, notification_text_for_others, system=True, exclude_user=current_user)
+                # notify_removed_from_chat(chat, current_user, actor=None) # Уведомление себе о выходе
+                return Response({'status': 'Вы покинули чат.'}, status=status.HTTP_204_NO_CONTENT)
+
+        except Exception as e:
+             logger.error(f"Error during user {current_user.id} leaving chat {pk}: {e}", exc_info=True)
+             return Response({'error': f'Ошибка при выходе из чата: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'], url_path='mark-read')
+    def mark_read(self, request, pk=None):
+        chat = self.get_object()
         serializer = MarkReadSerializer(data={}, context={'request': request, 'chat': chat})
         if serializer.is_valid():
             try:
-                logger.debug(f"MarkRead View: Serializer is valid, calling save() for chat {pk}")
-                participant_info = serializer.save() # Вызываем save и получаем результат
-                logger.info(f"MarkRead View: Serializer save finished for chat {pk}. Participant updated/created: {participant_info is not None}. Last read message ID: {getattr(participant_info, 'last_read_message_id', 'N/A')}")
-
-                # Отправляем WS уведомление об обновлении счетчика ТОЛЬКО ПОСЛЕ успешного save
-                # Проверяем, что participant_info не None (на случай если save вернул None)
+                participant_info = serializer.save()
                 if participant_info:
-                    self.notify_user_unread_update(request.user, chat.pk)
-                else:
-                     logger.warning(f"MarkRead View: Serializer save returned None for chat {pk}, user {request.user.id}. Skipping WS notification.")
-
-
-                return Response(status=status.HTTP_204_NO_CONTENT) # Успех без содержимого
-
+                    channel_layer = get_channel_layer()
+                    chat_group_name = f'chat_{chat.pk}'
+                    event_data = {
+                        'type': 'message.read_receipt',
+                        'chat_id': chat.pk,
+                        'reader_id': request.user.id,
+                        'last_read_message_id': participant_info.last_read_message.id if participant_info.last_read_message else None,
+                    }
+                    async_to_sync(channel_layer.group_send)(chat_group_name, event_data)
+                    self.notify_user_unread_update(request.user, chat.pk) # Обновляем счетчик для себя
+                return Response(status=status.HTTP_204_NO_CONTENT)
             except Exception as e:
-                 # Ловим исключения, проброшенные из serializer.save()
                  logger.error(f"MarkRead View: Error during serializer.save() for chat {pk}: {e}", exc_info=True)
-                 # Возвращаем 500, так как это внутренняя ошибка сервера
                  return Response({'error': 'Failed to update read status due to internal error.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         else:
-            # Сюда не должны попасть при пустых data={}, но на всякий случай
-            logger.error(f"MarkReadSerializer unexpected validation errors: {serializer.errors}")
+            logger.error(f"MarkReadSerializer unexpected validation errors: {serializer.errors}") # Добавлено логирование
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # --- Вспомогательные методы для WebSocket ---
-    def notify_participants(self, chat: Chat, message_data: dict, system: bool = False, exclude_user: User | None = None):
-        """ Отправляет сообщение или событие всем участникам чата через WebSocket. """
+    # Вспомогательный метод для отправки WS уведомлений в чат
+    def notify_participants(self, chat: Chat, message_content_or_data, system: bool = False, exclude_user: Optional[User] = None):
         try:
             channel_layer = get_channel_layer()
             group_name = f"chat_{chat.pk}"
             event_type = "chat.system_message" if system else "chat.message"
-            event_content = {"message": message_data} if not system else {"text": message_data} # Разный формат для системных
+            
+            if system:
+                event_content = {"text": message_content_or_data}
+            else:
+                event_content = {"message": message_content_or_data}
 
-            print(f"[WS Notify] Sending to group {group_name}: type={event_type}, content={event_content}")
-
-            # Формируем список каналов для отправки, исключая exclude_user, если он указан
-            # Это потребует хранения channel_name для каждого пользователя онлайн
-            # Упрощенный вариант - просто отправляем в группу
-            # TODO: Реализовать исключение пользователя, если нужно
+            sender_id_for_event = None
+            if exclude_user:
+                sender_id_for_event = exclude_user.id
+            elif not system and isinstance(message_content_or_data, dict):
+                sender_id_for_event = message_content_or_data.get('sender', {}).get('id')
 
             async_to_sync(channel_layer.group_send)(
                 group_name,
-                {"type": event_type, **event_content}, # Распаковываем event_content
+                {
+                    "type": event_type,
+                    **event_content,
+                    "sender_id": sender_id_for_event, # ID пользователя, которого нужно исключить из получателей этого же сообщения (для системных) или ID отправителя (для обычных)
+                }
             )
-            print(f"[WS Notify] Sent to group {group_name}")
         except Exception as e:
-            print(f"!!! ERROR sending WS notification for chat {chat.pk}: {e}")
+            logger.error(f"!!! ERROR sending WS CHAT notification for chat {chat.pk}: {e}", exc_info=True)
 
+    # Вспомогательный метод для отправки WS уведомления об обновлении счетчика непрочитанных
     def notify_user_unread_update(self, user: User, chat_id: int):
-         """ Отправляет событие обновления счетчика непрочитанных конкретному пользователю через NotificationConsumer. """
          try:
             channel_layer = get_channel_layer()
-            user_channel_group = f"user_{user.id}"
-
-            # --- РАССЧЕТ АКТУАЛЬНОГО СЧЕТЧИКА ДЛЯ ПОЛУЧАТЕЛЯ 'user' ---
+            user_channel_group = f"user_{user.id}" # Группа для NotificationConsumer
             unread_count = 0
-            try:
-                 # Находим запись ИМЕННО ЭТОГО пользователя в чате
+            try: # Расчет непрочитанных
                  participant = ChatParticipant.objects.select_related('last_read_message').get(chat_id=chat_id, user=user)
                  last_read_msg = participant.last_read_message
                  if last_read_msg and last_read_msg.timestamp:
-                     # Считаем сообщения ПОЗЖЕ времени прочтения ЭТИМ пользователем
                      unread_count = Message.objects.filter(chat_id=chat_id, timestamp__gt=last_read_msg.timestamp).count()
-                 else:
-                     # Если пользователь ничего не читал, считаем ВСЕ сообщения
+                 else: # Если нет last_read_message, считаем все сообщения в чате
                      unread_count = Message.objects.filter(chat_id=chat_id).count()
-            except ChatParticipant.DoesNotExist:
-                 # Если нет записи участника, считаем все сообщения непрочитанными ДЛЯ НЕГО
-                 unread_count = Message.objects.filter(chat_id=chat_id).count()
-                 logger.warning(f"notify_user_unread_update: ChatParticipant not found for user {user.id}, chat {chat_id}. Sending total count: {unread_count}")
-            except Exception as e_count:
+            except ChatParticipant.DoesNotExist: # Если пользователь еще не читал ничего (или не участник)
+                 unread_count = Message.objects.filter(chat_id=chat_id).count() # Считаем все
+            except Exception as e_count: # Другие ошибки при подсчете
                  logger.error(f"notify_user_unread_update: Error calculating unread count for user {user.id}, chat {chat_id}: {e_count}", exc_info=True)
-                 return # Не отправляем WS при ошибке подсчета
-
-            # --- КОНЕЦ РАССЧЕТА ---
+                 return # Не отправляем, если не смогли посчитать
 
             event_data = {
-                 "type": "chat.unread_update",
+                 "type": "chat_unread_update", # Этот тип должен обрабатываться в NotificationConsumer
                  "chat_id": chat_id,
-                 "unread_count": unread_count # Отправляем актуальный счетчик для ЭТОГО пользователя
+                 "unread_count": unread_count
              }
-            logger.info(f"[WS Notify] Sending unread update to {user_channel_group}: {event_data}")
-            async_to_sync(channel_layer.group_send)(
-                user_channel_group,
-                event_data,
-            )
-            logger.debug(f"[WS Notify] Sent unread update to {user_channel_group}")
-         except Exception as e:
-            logger.error(f"!!! ERROR sending WS unread update for user {user.id}, chat {chat_id}: {e}", exc_info=True)
+            async_to_sync(channel_layer.group_send)(user_channel_group, event_data)
+         except Exception as e: # Ошибки отправки через Channels
+            logger.error(f"!!! ERROR sending WS UNREAD update for user {user.id}, chat {chat_id}: {e}", exc_info=True)
 
-
+# Класс MessageViewSet предоставляет полный CRUD-функционал (ModelViewSet) для управления сообщениями в чате.
+# - serializer_class: Использует MessageSerializer.
+# - permission_classes (базовый): Требует аутентификации пользователя.
+# Метод get_queryset:
+#   1. Получает 'chat_pk' из URL (этот ViewSet вложен в ChatViewSet).
+#   2. Проверяет, является ли запрашивающий пользователь участником данного чата. Если нет, выбрасывает PermissionDenied.
+#   3. Возвращает QuerySet сообщений из указанного чата, с предзагрузкой профиля отправителя,
+#      отсортированных по времени отправки (сначала старые).
+# Метод perform_create:
+#   1. Получает объект чата, к которому относится создаваемое сообщение.
+#   2. Удаляет временные поля `_isSending` и `_tempId` из валидированных данных.
+#   3. Сохраняет сообщение, устанавливая текущего пользователя как отправителя и связывая с чатом.
+#   4. Обновляет поле `last_message` у объекта Chat.
+#   5. Отправляет WebSocket-уведомление о новом сообщении всем участникам чата через метод `notify_participants`.
+#   6. Отправляет WebSocket-уведомления об обновлении счетчика непрочитанных сообщений всем получателям
+#      (кроме отправителя) через метод `notify_user_unread_update`.
 class MessageViewSet(viewsets.ModelViewSet):
-    """Просмотр и отправка сообщений в конкретном чате."""
     serializer_class = MessageSerializer
     permission_classes = [permissions.IsAuthenticated]
     # TODO: Добавить пагинацию для сообщений
     # pagination_class = YourMessagePaginationClass
 
     def get_queryset(self):
-        """ Возвращает сообщения для конкретного чата, доступного пользователю. """
         chat_pk = self.kwargs.get('chat_pk')
-        if not chat_pk:
-            # Это не должно происходить из-за URL conf, но на всякий случай
+        if not chat_pk: # Если chat_pk не передан (маловероятно при вложенных роутерах)
             return Message.objects.none()
-
-        # Проверяем доступ пользователя к чату ОДИН РАЗ
         try:
-            # get_object_or_404 здесь не нужен, достаточно exists() или filter().exists()
+            # Проверка, что пользователь является участником чата
             if not ChatParticipant.objects.filter(chat_id=chat_pk, user=self.request.user).exists():
                 raise PermissionDenied("Вы не являетесь участником этого чата.")
-        except ValueError: # Если chat_pk не число
+        except ValueError: # Если chat_pk не может быть преобразован в int
              raise ValidationError("Неверный ID чата.")
-
-        # Возвращаем сообщения, новые снизу (стандартно для чатов)
         return Message.objects.filter(chat_id=chat_pk).select_related('sender__profile').order_by('timestamp')
 
     def perform_create(self, serializer):
-        """ Создает сообщение, обновляет last_message чата и отправляет WS уведомление. """
         chat_pk = self.kwargs.get('chat_pk')
-        # Получаем чат еще раз (или берем из контекста, если передали при get_queryset)
-        # Проверка доступа уже была в get_queryset, но повторим для надежности
+        # Получаем чат, проверяя, что текущий пользователь является его участником
         chat = get_object_or_404(Chat.objects.filter(participants=self.request.user), pk=chat_pk)
-
-        # --- ИСПРАВЛЕНИЕ: Удаляем временные поля перед сохранением ---
+        
+        # Удаляем временные поля из validated_data перед сохранением
         validated_data = serializer.validated_data
+        temp_id = validated_data.pop('_tempId', None) # Сохраняем temp_id, если он был
         validated_data.pop('_isSending', None)
-        validated_data.pop('_tempId', None)
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
         try:
-            # Передаем очищенные validated_data
+            # Сохраняем сообщение с текущим пользователем как отправителем
             instance = serializer.save(sender=self.request.user, chat=chat)
         except Exception as e:
-            print(f"Error saving message for chat {chat_pk}: {e}")
-            raise ValidationError(f"Failed to save message: {e}")
+            logger.error(f"Error saving message for chat {chat_pk}: {e}", exc_info=True)
+            raise ValidationError(f"Failed to save message: {e}") # Пробрасываем как ошибку валидации
 
-        # Обновляем last_message в чате (быстро и атомарно)
-        updated_count = Chat.objects.filter(pk=chat.pk).update(last_message=instance)
-        if updated_count > 0:
-            print(f"[perform_create] Updated last_message for chat {chat.pk}")
-        else:
-            print(f"[perform_create] Warning: Failed to update last_message for chat {chat.pk}")
+        # Обновляем last_message в чате
+        Chat.objects.filter(pk=chat.pk).update(last_message=instance)
+        logger.info(f"[Message PerformCreate] Updated last_message for chat {chat.pk} to message {instance.id}")
 
+        # --- Отправка через WebSocket ---
+        # Сериализуем созданное сообщение для отправки через WS
+        message_data = MessageSerializer(instance, context=self.get_serializer_context()).data
+        
+        # Добавляем temp_id обратно в данные для WS, если он был, чтобы клиент мог сопоставить
+        if temp_id:
+            message_data['_tempIdEcho'] = temp_id # Используем другое имя, чтобы не путать
 
-        # --- ОТПРАВКА ЧЕРЕЗ WEBSOCKET ---
-        message_data = MessageSerializer(instance, context={'request': self.request}).data
-        chat_viewset = ChatViewSet()
+        # Используем экземпляр ChatViewSet для вызова его метода (или выносим notify_participants в utils)
+        chat_viewset_instance = ChatViewSet() # Создаем временный экземпляр
+        chat_viewset_instance.request = self.request # Передаем request, если он нужен в notify_participants
 
-        # 1. Отправляем само сообщение всем участникам (кроме себя, если настроено в Consumer)
-        chat_viewset.notify_participants(chat, message_data, system=False)
+        # Отправляем сообщение всем участникам чата, включая эхо отправителю (если temp_id был)
+        chat_viewset_instance.notify_participants(
+            chat,
+            message_data, # Сериализованное сообщение
+            system=False
+        )
 
-        # --- 2. Отправляем обновление счетчика КАЖДОМУ ПОЛУЧАТЕЛЮ ---
+        # --- Обновление счетчиков непрочитанных для ПОЛУЧАТЕЛЕЙ ---
         # Получаем всех участников чата, КРОМЕ отправителя
-        recipients = chat.participants.filter(is_active=True).exclude(id=self.request.user.id)
-        for recipient in recipients:
+        recipients_to_notify_unread = chat.participants.filter(is_active=True).exclude(id=self.request.user.id)
+        for recipient in recipients_to_notify_unread:
              try:
-                 # Вызываем обновление счетчика для КАЖДОГО получателя
-                 chat_viewset.notify_user_unread_update(recipient, chat.pk)
-                 print(recipient)
-             except Exception as e_notify:
-                 logger.error(f"Failed to send unread update notification to user {recipient.id} for chat {chat.pk}: {e_notify}", exc_info=True)
+                 chat_viewset_instance.notify_user_unread_update(recipient, chat.pk)
+             except Exception as e_notify_unread:
+                 logger.error(f"Failed to send unread update to user {recipient.id} for chat {chat.pk} after new message: {e_notify_unread}", exc_info=True)
 
-        # TODO: Отправить уведомление (push/email) - опционально
+        # Основное уведомление через систему Notification (вызывается через сигнал post_save для Message)
+        # поэтому здесь его дублировать не нужно.

@@ -1,0 +1,186 @@
+<template>
+    <!-- Добавляем fill-height для растягивания карточки и router-link для кликабельности -->
+    <v-card
+      class="mb-4 fill-height d-flex flex-column"
+      elevation="2"
+      hover
+      @click="navigateToDetail"
+      style="cursor: pointer;"
+    >
+      <v-card-title class="text-h6 font-weight-bold pb-1"> <!-- Крупнее и жирнее -->
+          {{ homework.title }}
+      </v-card-title>
+  
+      <v-card-subtitle class="pb-2">
+          <div>Предмет: {{ homework.lesson_subject || 'Не указан' }}</div>
+          <div v-if="homework.author_details">
+              Автор: {{ homework.author_details.first_name }} {{ homework.author_details.last_name }}
+          </div>
+          <div>
+              Срок сдачи:
+              <v-chip
+                  v-if="homework.due_date"
+                  size="small"
+                  :color="isOverdue ? 'error' : 'grey-darken-1'"
+                  label
+                  class="ml-1"
+                  variant="tonal"
+              >
+                  {{ formatDate(homework.due_date) }}
+                  <span v-if="isOverdue" class="ml-1">(Просрочено!)</span>
+              </v-chip>
+              <span v-else>Не указан</span>
+          </div>
+      </v-card-subtitle>
+  
+      <!-- flex-grow-1 чтобы текст занимал доступное пространство -->
+      <v-card-text class="flex-grow-1">
+        <!-- Используем v-html для описания, очищенного DOMPurify -->
+        <div v-html="purifiedDescription" class="homework-description-preview text-body-2"></div>
+      </v-card-text>
+  
+      <v-divider v-if="homework.attachments && homework.attachments.length > 0"></v-divider>
+      <v-card-text v-if="homework.attachments && homework.attachments.length > 0" class="py-2">
+         <span class="text-caption font-weight-medium">Вложения к заданию: {{ homework.attachments.length }}</span>
+         <!-- Можно показать первые несколько иконок файлов или общее количество -->
+         <div>
+          <v-chip v-for="att in homework.attachments.slice(0, 3)" :key="att.id" size="x-small" label class="mr-1 mt-1" prepend-icon="mdi-paperclip">
+              {{ getFileName(att.file_url) }}
+          </v-chip>
+          <span v-if="homework.attachments.length > 3" class="text-caption"> и еще {{ homework.attachments.length - 3 }}...</span>
+         </div>
+      </v-card-text>
+  
+      <v-divider v-if="homework.related_materials_details && homework.related_materials_details.length > 0"></v-divider>
+      <v-card-text v-if="homework.related_materials_details && homework.related_materials_details.length > 0" class="py-2">
+          <span class="text-caption font-weight-medium">Связанные материалы: {{ homework.related_materials_details.length }}</span>
+           <div>
+              <v-chip v-for="mat in homework.related_materials_details.slice(0, 3)" :key="mat.id" size="x-small" label class="mr-1 mt-1" prepend-icon="mdi-link-variant">
+                  {{ mat.title }}
+              </v-chip>
+               <span v-if="homework.related_materials_details.length > 3" class="text-caption"> и еще {{ homework.related_materials_details.length - 3 }}...</span>
+           </div>
+      </v-card-text>
+  
+      <!-- Кнопки управления удалены отсюда -->
+      <!-- <v-card-actions v-if="authStore.user?.role === 'TEACHER' || authStore.user?.role === 'ADMIN'">
+        <v-spacer></v-spacer>
+        <v-btn color="primary" variant="text" size="small" :to="`/homework/${homework.id}/edit`">Редактировать</v-btn>
+        <v-btn color="error" variant="text" size="small" @click.stop="confirmDelete" :loading="isDeleting">Удалить</v-btn>
+      </v-card-actions> -->
+    </v-card>
+  
+    <!-- Диалог удаления больше не нужен здесь, он будет на странице деталей -->
+    <!--
+    <v-dialog v-model="deleteDialog" max-width="400">
+      ...
+    </v-dialog>
+    -->
+  </template>
+  
+  <script setup lang="ts">
+  import type { Homework } from '@/types';
+  import { type PropType, computed } from 'vue';
+  // import { useAuthStore } from '@/stores/auth'; // Больше не нужен для кнопок
+  // import { useHomeworkStore } from '@/stores/useHomeworkStore'; // Больше не нужен для удаления
+  import { useRouter } from 'vue-router';
+  import { format, parseISO, isPast } from 'date-fns';
+  import { ru } from 'date-fns/locale';
+  import DOMPurify from 'dompurify'; // Для очистки HTML
+  
+  const props = defineProps({
+    homework: {
+      type: Object as PropType<Homework>,
+      required: true
+    }
+  });
+  // const emit = defineEmits(['deleted']); // Больше не нужен, удаление будет на странице деталей
+  
+  // const authStore = useAuthStore(); // Не нужен
+  // const homeworkStore = useHomeworkStore(); // Не нужен
+  const router = useRouter();
+  
+  // const deleteDialog = ref(false); // Не нужен
+  // const isDeleting = ref(false); // Не нужен
+  
+  const formatDate = (dateString?: string | null) => {
+      if (!dateString) return null;
+      try {
+          // Отображаем только дату для срока сдачи в карточке, время можно в деталях
+          return format(parseISO(dateString), 'dd.MM.yyyy', { locale: ru });
+      } catch (e) {
+          return dateString;
+      }
+  };
+  
+  const isOverdue = computed(() => {
+      const dueDate = props.homework.due_date;
+      return dueDate ? isPast(parseISO(dueDate)) : false;
+  });
+  
+  // Очищаем HTML от потенциально опасных тегов/атрибутов перед рендерингом
+  const purifiedDescription = computed(() => {
+      // Создаем конфигурацию DOMPurify, если нужно разрешить определенные теги/атрибуты
+      // const clean = DOMPurify.sanitize(props.homework.description, { USE_PROFILES: { html: true } });
+      // Для простого текста с базовым форматированием, можно оставить настройки по умолчанию
+      // Но для отображения blockquote, strong, em, s - они должны быть разрешены.
+      // StarterKit TipTap обычно использует p, strong, em, ul, ol, li, blockquote, s, u.
+      const clean = DOMPurify.sanitize(props.homework.description, {
+          ALLOWED_TAGS: ['p', 'strong', 'em', 's', 'u', 'ul', 'ol', 'li', 'blockquote', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a'],
+          ALLOWED_ATTR: ['href', 'target', 'rel'] // Для ссылок
+      });
+      return clean;
+  });
+  
+  const getFileName = (url: string) => {
+      try {
+          const urlObj = new URL(url);
+          const pathSegments = urlObj.pathname.split('/');
+          return decodeURIComponent(pathSegments[pathSegments.length - 1]);
+      } catch (e) {
+          return url;
+      }
+  };
+  
+  const navigateToDetail = () => {
+    router.push(`/homework/${props.homework.id}`);
+  };
+  
+  // Функции confirmDelete и executeDelete больше не нужны здесь
+  </script>
+  
+  <style scoped>
+  .fill-height {
+    height: 100%; /* Убедимся, что карточка пытается занять всю высоту колонки */
+  }
+  
+  .homework-description-preview {
+    display: -webkit-box;
+    -webkit-line-clamp: 3; /* Ограничиваем количество строк для описания */
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.5em; /* Стандартный межстрочный интервал */
+    max-height: calc(1.5em * 3); /* 3 строки */
+    word-break: break-word; /* Перенос слов */
+  }
+  
+  /* Стили для контента из v-html, если нужно */
+  .homework-description-preview ::v-deep(p) {
+    margin-bottom: 0.25em !important; /* Уменьшаем отступы параграфов в превью */
+    line-height: 1.4;
+  }
+  .homework-description-preview ::v-deep(blockquote) {
+    margin-left: 1em;
+    padding-left: 0.5em;
+    border-left: 3px solid rgba(var(--v-border-color), var(--v-border-opacity));
+    font-style: italic;
+    color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+  }
+  /* Добавьте другие стили для strong, em, s, ul, ol, li по необходимости */
+  .homework-description-preview ::v-deep(ul),
+  .homework-description-preview ::v-deep(ol) {
+      padding-left: 1.2em;
+      margin-bottom: 0.25em;
+  }
+  </style>

@@ -37,16 +37,13 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_spectacular',
     'users',
-    'monitor',
-    #'schedule',
-    'news',
     'messaging',
-    'forum',
     'notifications',
     'core',
-    #'academics',
     'edu_core',
-    
+    'django_celery_results', # Для хранения результатов задач
+    'django_celery_beat', 
+    'stats',
     
 ]
 
@@ -158,7 +155,7 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema', # Для Swagger/OpenAPI
     
-    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend']
+    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
     # 'DEFAULT_THROTTLING_CLASSES': [ # Ограничение частоты запросов (рекомендуется для продакшена)
     #     'rest_framework.throttling.AnonRateThrottle',
     #     'rest_framework.throttling.UserRateThrottle'
@@ -167,12 +164,14 @@ REST_FRAMEWORK = {
     #     'anon': '100/day',
     #     'user': '1000/day'
     # }
+    # 'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.LimitOffsetPagination', # Или 'rest_framework.pagination.LimitOffsetPagination'
+    # 'PAGE_SIZE': 10, 
 }
 
 from datetime import timedelta
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60), # Увеличим время жизни
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=2), # Увеличим время жизни
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=14),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': True, # Обновлять last_login при получении токена
@@ -195,14 +194,25 @@ SIMPLE_JWT = {
     'TOKEN_TYPE_CLAIM': 'token_type',
 }
 
-# Настройки email (замените на реальные для отправки подтверждений)
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend' # Для вывода в консоль при разработке
-# EMAIL_HOST = 'smtp.example.com'
-# EMAIL_PORT = 587
-# EMAIL_USE_TLS = True
-# EMAIL_HOST_USER = 'your_email@example.com'
-# EMAIL_HOST_PASSWORD = 'your_password'
-# DEFAULT_FROM_EMAIL = 'webmaster@example.com'
+if DEBUG: # Или просто для локальной разработки
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+else:
+    # Настройки для реального SMTP (для продакшена)
+    EMAIL_BACKEND = os.environ.get('DJANGO_EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+    EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.yourprovider.com')
+
+    # EMAIL_HOST = 'smtp.example.com'
+    # EMAIL_PORT = 587
+    # EMAIL_USE_TLS = True
+    # EMAIL_HOST_USER = 'your_email@example.com'
+    # EMAIL_HOST_PASSWORD = 'your_password'
+    # DEFAULT_FROM_EMAIL = 'webmaster@example.com'
+
+
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173') # Или другой порт вашего локального фронтенда
+EMAIL_CONFIRMATION_EXPIRE_DAYS = 1
+PASSWORD_RESET_TIMEOUT_HOURS = int(os.environ.get('PASSWORD_RESET_TIMEOUT_HOURS', 24))
+
 # --- Настройки Channels ---
 
 # --- Настройки CORS ---
@@ -302,5 +312,44 @@ LOGGING = {
          #     'handlers': ['console'],
          #     'level': 'DEBUG',
          # },
+    }
+}
+
+# --- Настройки Celery ---
+# URL брокера сообщений (Redis)
+# Используем ту же базу Redis, что и для Channels, или другую, если хотите разделить
+# CELERY_BROKER_URL = f"redis://{':'+REDIS_PASSWORD+'@' if REDIS_PASSWORD else ''}{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+CELERY_BROKER_URL = "redis://127.0.0.1:6379/0"
+# Бэкенд для хранения результатов задач (опционально)
+# Если используете django-celery-results:
+CELERY_RESULT_BACKEND = 'django-db' # Результаты будут храниться в БД Django
+# Если не нужен бэкенд результатов или хотите использовать Redis:
+# CELERY_RESULT_BACKEND = CELERY_BROKER_URL # Можно использовать тот же Redis
+# CELERY_IGNORE_RESULT = True # Если результаты не важны и вы не хотите их хранить
+
+# Формат сериализации задач и результатов
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+
+# Временная зона для Celery (важно для Celery Beat)
+CELERY_TIMEZONE = TIME_ZONE # Используем TIME_ZONE из настроек Django
+
+# Настройки для django-celery-beat (если используется)
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler' # Хранить расписание в БД
+
+REDIS_CACHE_DB = "redis://127.0.0.1:6379/1"
+cache_location = ""
+# if REDIS_PASSWORD:
+#     cache_location = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_CACHE_DB}"
+# else:
+cache_location = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CACHE_DB}"
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://127.0.0.1:6379/1",
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
     }
 }

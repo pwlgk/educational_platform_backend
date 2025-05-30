@@ -1,0 +1,106 @@
+import { defineStore } from 'pinia';
+import { ref } from 'vue';
+import { eduCoreApi } from '@/api/eduCore.api';
+import type { Classroom, ClassroomRequest, PatchedClassroomRequest } from '@/types';
+import { useGlobalNotificationStore } from './globalNotification';
+
+interface ClassroomFilters {
+    capacity?: number;
+    ordering?: string;
+    search?: string;
+    type?: string; // Enum TypeEnum из API
+}
+
+export const useClassroomStore = defineStore('classroom', () => {
+    const notificationStore = useGlobalNotificationStore();
+    const classrooms = ref<Classroom[]>([]);
+    const isLoading = ref(false);
+    const error = ref<string | null>(null);
+    const currentFilters = ref<ClassroomFilters>({}); // Для хранения текущих фильтров
+
+    async function fetchClassrooms(filters?: ClassroomFilters) {
+        isLoading.value = true;
+        error.value = null;
+        if (filters) {
+            currentFilters.value = filters;
+        }
+        try {
+            classrooms.value = await eduCoreApi.eduCoreManagementClassroomsList(currentFilters.value);
+        } catch (err: any) {
+            error.value = err.response?.data?.detail || err.message || "Не удалось загрузить аудитории";
+            console.error("Ошибка при загрузке аудиторий:", err);
+            classrooms.value = [];
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+    async function createClassroom(data: ClassroomRequest): Promise<Classroom> {
+        isLoading.value = true;
+        error.value = null;
+        try {
+            const newClassroom = await eduCoreApi.eduCoreManagementClassroomsCreate(data);
+            notificationStore.showSuccessSnackbar('Аудитория успешно создана!');
+            await fetchClassrooms(currentFilters.value); // Обновляем список с текущими фильтрами
+            return newClassroom;
+        } catch (err: any) {
+            error.value = err.response?.data?.detail || err.message || "Не удалось создать аудиторию";
+            console.error("Ошибка при создании аудитории:", err);
+            notificationStore.showErrorSnackbar(error.value);
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+    async function updateClassroom(id: number, data: PatchedClassroomRequest): Promise<Classroom> {
+        isLoading.value = true;
+        error.value = null;
+        try {
+            const updatedClassroom = await eduCoreApi.eduCoreManagementClassroomsPartialUpdate(id, data);
+            notificationStore.showSuccessSnackbar('Аудитория успешно обновлена!');
+            await fetchClassrooms(currentFilters.value);
+            return updatedClassroom;
+        } catch (err: any) {
+            error.value = err.response?.data?.detail || err.message || "Не удалось обновить аудиторию";
+            console.error("Ошибка при обновлении аудитории:", err);
+            notificationStore.showErrorSnackbar(error.value);
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+    async function deleteClassroom(id: number): Promise<void> {
+        isLoading.value = true;
+        error.value = null;
+        try {
+            await eduCoreApi.eduCoreManagementClassroomsDestroy(id);
+            notificationStore.showSuccessSnackbar('Аудитория успешно удалена!');
+            await fetchClassrooms(currentFilters.value);
+        } catch (err: any) {
+            error.value = err.response?.data?.detail || err.message || "Не удалось удалить аудиторию";
+            console.error("Ошибка при удалении аудитории:", err);
+            notificationStore.showErrorSnackbar(error.value);
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+    
+    function setFiltersAndFetch(filters: ClassroomFilters) {
+        fetchClassrooms(filters);
+    }
+
+    return {
+        classrooms,
+        isLoading,
+        error,
+        currentFilters,
+        fetchClassrooms,
+        createClassroom,
+        updateClassroom,
+        deleteClassroom,
+        setFiltersAndFetch
+    };
+});

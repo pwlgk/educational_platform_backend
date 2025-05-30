@@ -17,6 +17,7 @@ urlpatterns = [
     # Эндпоинты API приложения monitor
     path('api/users/', include('users.urls')), 
     path('api/edu-core/', include('edu_core.urls')),
+    path('api/stats/', include('stats.urls')),
 
     # Эндпоинты для JWT аутентификации
     #path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

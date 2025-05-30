@@ -1,0 +1,38 @@
+import './assets/styles/main.scss';
+import { createApp } from 'vue';
+import App from '@/App.vue';
+import { registerPlugins } from '@/plugins'; // Здесь регистрируются Pinia и Router
+import { useAuthStore } from '@/stores/auth'; // Импортируем auth store
+
+async function initializeApp() {
+  const app = createApp(App);
+
+  registerPlugins(app); // Регистрируем Pinia и Router, чтобы store был доступен
+
+  const authStore = useAuthStore(); // Получаем экземпляр store ПОСЛЕ регистрации Pinia
+
+  try {
+    // Пытаемся загрузить пользователя, если есть токен.
+    // loadUser должен быть достаточно умным, чтобы не делать API запрос, если токена нет.
+    // Он также установит isLoggedIn.
+    if (authStore.accessToken) { // Проверяем наличие токена перед попыткой загрузки
+      await authStore.loadUser();
+      console.log('[main.ts] User loaded on init:', authStore.user?.email);
+    } else {
+      console.log('[main.ts] No access token found on init.');
+      authStore.isLoggedIn = false; // Явно устанавливаем, если токена нет
+      // user остается null, что правильно
+    }
+  } catch (error) {
+    // Если loadUser не удался (например, токен невалиден),
+    // он должен был вызвать clearAuthData() внутри себя, установив isLoggedIn в false.
+    console.error('[main.ts] Error during initial user load:', error);
+    // isLoggedIn уже должен быть false из-за clearAuthData в loadUser или refreshAccessToken
+  }
+
+  // Теперь, когда статус аутентификации известен, монтируем приложение
+  app.mount('#app');
+  console.log('[main.ts] App mounted. isLoggedIn:', authStore.isLoggedIn);
+}
+
+initializeApp();

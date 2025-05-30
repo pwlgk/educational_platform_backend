@@ -1,0 +1,50 @@
+{% load i18n %}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% blocktrans with platform_name=platform_name %}Подтверждение аккаунта на {{ platform_name }}{% endblocktrans %}</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f4f4f4; }
+        .container { max-width: 600px; margin: 20px auto; padding: 20px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; padding-bottom: 20px; border-bottom: 1px solid #eeeeee; }
+        .header h1 { color: #0056b3; margin: 0; }
+        .content { padding: 20px 0; }
+        .content p { margin-bottom: 15px; }
+        .button { display: inline-block; background-color: #007bff; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; }
+        .button:hover { background-color: #0056b3; }
+        .footer { text-align: center; padding-top: 20px; border-top: 1px solid #eeeeee; font-size: 0.9em; color: #777; }
+        .footer a { color: #007bff; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{{ platform_name }}</h1>
+        </div>
+        <div class="content">
+            <p>{% blocktrans with first_name=first_name %}Здравствуйте, {{ first_name }}!{% endblocktrans %}</p>
+            
+            <p>{% blocktrans with platform_name=platform_name %}Благодарим вас за регистрацию на платформе "{{ platform_name }}".{% endblocktrans %}</p>
+            
+            <p>{% translate "Для завершения регистрации и активации вашего аккаунта, пожалуйста, перейдите по следующей ссылке:" %}</p>
+            
+            <p style="text-align: center; margin: 25px 0;">
+                <a href="{{ confirm_url }}" class="button">{% translate "Активировать аккаунт" %}</a>
+            </p>
+            
+            <p>{% translate "Если кнопка не работает, скопируйте и вставьте следующий URL в адресную строку вашего браузера:" %}</p>
+            <p><a href="{{ confirm_url }}">{{ confirm_url }}</a></p>
+            
+            <p>{% translate "Если вы не регистрировались на нашей платформе, пожалуйста, проигнорируйте это письмо." %}</p>
+        </div>
+        <div class="footer">
+            <p>© {{ current_year }} {{ platform_name }}. {% translate "Все права защищены." %}</p>
+            <p>{% translate "Это письмо было отправлено автоматически, пожалуйста, не отвечайте на него." %}</p>
+            {# Опционально: ссылка на сайт #}
+            {# <p><a href="{{ settings.FRONTEND_URL }}">Перейти на сайт</a></p> #}
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,650 @@
+// src/stores/messaging.ts
+import { defineStore } from 'pinia';
+import { ref, computed, nextTick } from 'vue';
+import { messagingApi } from '@/api/messaging.api';
+import apiClient from '@/api/index';
+import type {
+  Chat,
+  Message,
+  ChatRequest,
+  MessageRequest,
+  PatchedMessageRequest,
+  MediaMessage,
+  PaginatedMediaMessageList,
+  User,
+} from '@/types';
+import router from '@/plugins/router';
+import { useAuthStore } from './auth';
+import { useGlobalNotificationStore } from './globalNotification';
+
+// Расширенный тип сообщения для UI
+export interface UIMessage extends Message {
+  _isSending?: boolean;
+  _tempId?: string;
+  _isDelivered?: boolean;
+  _isReadByRecipient?: boolean;
+}
+
+// Тип для статуса пользователя
+export interface UserStatus {
+  is_online: boolean;
+  last_seen?: string | null;
+}
+
+export const useMessagingStore = defineStore('messaging', () => {
+  const chats = ref<Chat[]>([]);
+  const currentChat = ref<Chat | null>(null);
+  const messages = ref<UIMessage[]>([]);
+  const media = ref<MediaMessage[]>([]);
+
+  const isLoadingChats = ref(false);
+  const isLoadingMessages = ref(false);
+  const isLoadingMoreMessages = ref(false);
+  const isLoadingMedia = ref(false);
+  const isSendingMessage = ref(false);
+  const error = ref<string | null>(null);
+
+  // TODO: Реализовать логику пагинации, если API сообщений будет ее поддерживать
+  const messagesPagination = ref<{ next: string | null; count: number; previous: string | null }>({ next: null, count: 0, previous: null });
+
+  const chatWebSocket = ref<WebSocket | null>(null);
+  const wsStatus = ref<'disconnected' | 'connecting' | 'open' | 'closing' | 'error'>('disconnected');
+  const currentWsChatId = ref<number | null>(null);
+  let reconnectTimeout: number | null = null;
+  let reconnectAttempts = 0;
+  const MAX_RECONNECT_ATTEMPTS = 10;
+  const RECONNECT_DELAY_MS = 3000;
+
+  const userStatuses = ref<Record<number, UserStatus>>({});
+
+  const getChatById = computed(() => (chatId: number) => {
+    return chats.value.find(chat => chat.id === chatId);
+  });
+
+  const getUserStatus = computed(() => (userId: number): UserStatus | undefined => {
+    return userStatuses.value[userId];
+  });
+
+  const lastMessageIsMine = ref(false);
+
+  function buildWebSocketUrl(chatId: number): string {
+    const authStore = useAuthStore();
+    const accessToken = authStore.accessToken;
+    const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const baseApiUrl = apiClient.defaults.baseURL || `${window.location.protocol}//${window.location.host}/api`;
+    const apiHost = baseApiUrl.replace(/https?:\/\//, '').replace(/\/api\/?$/, '');
+
+    if (!accessToken) {
+      console.error("No access token for WebSocket.");
+      wsStatus.value = 'error';
+      return `${protocol}${apiHost}/ws/chat/${chatId}/`; // Отправляем без токена, бэкенд должен отклонить
+    }
+    return `${protocol}${apiHost}/ws/chat/${chatId}/?token=${accessToken}`;
+  }
+
+  function attemptReconnect() {
+    if (wsStatus.value === 'connecting' || wsStatus.value === 'open') return;
+    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      reconnectAttempts++;
+      const delay = RECONNECT_DELAY_MS * Math.min(Math.pow(1.5, reconnectAttempts - 1), 15);
+      console.log(`Attempting WebSocket reconnect ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} for chat ${currentWsChatId.value} in ${delay.toFixed(0)}ms...`);
+      wsStatus.value = 'connecting';
+      reconnectTimeout = window.setTimeout(() => {
+        if (currentWsChatId.value !== null && wsStatus.value !== 'open') {
+          connectWebSocket(currentWsChatId.value);
+        }
+      }, delay);
+    } else {
+      console.error(`Max WebSocket reconnect attempts reached for chat ${currentWsChatId.value}.`);
+      wsStatus.value = 'error';
+      useGlobalNotificationStore().showErrorSnackbar('Не удалось восстановить соединение с чатом.');
+    }
+  }
+
+  async function connectWebSocket(chatId: number) {
+    if (chatWebSocket.value && (wsStatus.value === 'open' || wsStatus.value === 'connecting') && currentWsChatId.value === chatId) {
+      console.log(`WebSocket already connected or connecting to chat ${chatId}.`);
+      return;
+    }
+    if (chatWebSocket.value && currentWsChatId.value !== chatId && currentWsChatId.value !== null) {
+      console.log(`Disconnecting from previous chat ${currentWsChatId.value} before connecting to ${chatId}.`);
+      disconnectWebSocket();
+    }
+
+    console.log(`Attempting to establish WebSocket connection for chat ${chatId}...`);
+    wsStatus.value = 'connecting';
+    currentWsChatId.value = chatId;
+    error.value = null;
+
+    try {
+      const url = buildWebSocketUrl(chatId);
+      if (url.includes("undefined") && !url.includes("?token=")) {
+          throw new Error("WebSocket URL is invalid (likely missing token or host).");
+      }
+      chatWebSocket.value = new WebSocket(url);
+
+      chatWebSocket.value.onopen = (event) => {
+        console.log(`[WS STORE] WebSocket connected successfully to chat ${chatId}. Event:`, event);
+        wsStatus.value = 'open';
+        reconnectAttempts = 0;
+        if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+      };
+      chatWebSocket.value.onmessage = (event) => {
+        console.log("[WS STORE] WebSocket message received:", event.data);
+        try {
+          const messageData = JSON.parse(event.data as string);
+          handleWebSocketMessage(messageData);
+        } catch (parseError) {
+          console.error("Failed to parse WebSocket message:", parseError, event.data);
+        }
+      };
+      chatWebSocket.value.onerror = (event) => {
+        console.error(`[WS STORE] WebSocket error for chat ${chatId}:`, event);
+      };
+      chatWebSocket.value.onclose = (event) => {
+        console.log(`[WS STORE] WebSocket closed for chat ${chatId}. Code: ${event.code}, Reason: "${event.reason}", Clean: ${event.wasClean}`);
+        const wasManuallyClosed = wsStatus.value === 'closing';
+        wsStatus.value = 'disconnected';
+        const isCurrentChatConnection = currentWsChatId.value === chatId;
+
+        if (chatWebSocket.value === event.target) {
+          chatWebSocket.value = null;
+        }
+
+        if (isCurrentChatConnection && !wasManuallyClosed && event.code !== 1000 && event.code !== 1001) {
+            console.log("WebSocket closed unexpectedly. Attempting reconnect...");
+            attemptReconnect();
+        } else {
+            console.log("WebSocket closed normally or for a different/old chat.");
+            if (isCurrentChatConnection) currentWsChatId.value = null;
+            reconnectAttempts = 0;
+            if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+        }
+      };
+    } catch (err: any) {
+        console.error(`Failed to initiate WebSocket connection to chat ${chatId}:`, err.message);
+        wsStatus.value = 'error';
+        error.value = 'Не удалось установить WebSocket соединение.';
+        if (currentWsChatId.value === chatId) attemptReconnect();
+    }
+  }
+
+  function disconnectWebSocket() {
+    if (chatWebSocket.value) {
+      if (wsStatus.value !== 'disconnected' && wsStatus.value !== 'closing') {
+          console.log(`Manually disconnecting WebSocket from chat ${currentWsChatId.value}.`);
+          wsStatus.value = 'closing';
+          chatWebSocket.value.close(1000, 'Client disconnecting intentionally');
+      }
+    } else {
+      console.log("No active WebSocket to disconnect. Ensuring state is clean.");
+    }
+    if (wsStatus.value !== 'disconnected') wsStatus.value = 'disconnected';
+    currentWsChatId.value = null;
+    if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
+    reconnectAttempts = 0;
+  }
+
+  function handleWebSocketMessage(wsData: any) {
+    console.log("[WS STORE Received Frontend] Full data:", JSON.stringify(wsData, null, 2));
+    if (!wsData || !wsData.type) {
+        console.warn("[WS STORE Received Frontend] Invalid WS message format (missing type):", wsData);
+        return;
+    }
+    const authStore = useAuthStore();
+
+    switch (wsData.type) {
+        case 'chat.message': // ИСПРАВЛЕНО: тип события от бэкенда
+            const newMessageFromWs: Message = wsData.message;
+            if (!newMessageFromWs || !newMessageFromWs.id) {
+                console.warn("[WS STORE] 'chat.message' missing 'message' object or message.id:", wsData);
+                return;
+            }
+            console.log("[WS STORE] 'chat.message' content:", newMessageFromWs);
+            const newMessageForUI: UIMessage = { ...newMessageFromWs, _isDelivered: true, _isSending: false };
+
+            if (currentChat.value && newMessageForUI.chat_id === currentChat.value.id) {
+                const existingMessageIndex = messages.value.findIndex(msg =>
+                    (msg.id !== 0 && msg.id === newMessageForUI.id) ||
+                    (msg._tempId && wsData.temp_id_echo && msg._tempId === wsData.temp_id_echo)
+                );
+                if (existingMessageIndex > -1) {
+                    messages.value.splice(existingMessageIndex, 1, newMessageForUI);
+                } else {
+                    messages.value.push(newMessageForUI);
+                }
+                messages.value.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+                if (newMessageForUI.sender.id !== authStore.user?.id) {
+                    markChatAsRead(currentChat.value.id);
+                }
+            }
+
+            const chatIndexInList = chats.value.findIndex(chat => chat.id === newMessageForUI.chat_id);
+            if (chatIndexInList > -1) {
+                const updatedChatInList = { ...chats.value[chatIndexInList], last_message_details: newMessageForUI };
+                if (newMessageForUI.sender.id !== authStore.user?.id && newMessageForUI.chat_id !== currentChat.value?.id) {
+                    updatedChatInList.unread_count = (updatedChatInList.unread_count || 0) + 1;
+                } else if (newMessageForUI.chat_id === currentChat.value?.id) {
+                    updatedChatInList.unread_count = 0;
+                }
+                chats.value.splice(chatIndexInList, 1, updatedChatInList);
+            } else if (newMessageForUI.sender.id !== authStore.user?.id) {
+                console.warn(`[WS STORE] Received message for unknown chat ${newMessageForUI.chat_id}. Fetching all chats.`);
+                fetchChats();
+                if(currentChat.value && newMessageForUI.chat_id === currentChat.value.id && newMessageForUI.sender.id !== authStore.user?.id) {
+                    markChatAsRead(currentChat.value.id);
+                }
+            }
+            if (chats.value.length > 1) {
+              chats.value.sort((a, b) => {
+                  const timeA = a.last_message_details?.timestamp ? new Date(a.last_message_details.timestamp).getTime() : (a.created_at ? new Date(a.created_at).getTime() : 0);
+                  const timeB = b.last_message_details?.timestamp ? new Date(b.last_message_details.timestamp).getTime() : (b.created_at ? new Date(b.created_at).getTime() : 0);
+                  return timeB - timeA;
+              });
+            }
+            break;
+
+        case 'message_read_receipt':
+            const receiptData = wsData.data;
+            if (!receiptData || receiptData.reader_id === undefined || receiptData.last_read_message_id === undefined) {
+                console.warn("[WS STORE] 'message_read_receipt' missing critical data fields:", wsData);
+                return;
+            }
+            console.log(`[WS STORE] Message read receipt: chat ${receiptData.chat_id}, last_read_msg_id ${receiptData.last_read_message_id} by user ${receiptData.reader_id}`);
+            if (currentChat.value && receiptData.chat_id === currentChat.value.id && authStore.user?.id !== receiptData.reader_id) {
+                messages.value.forEach(msg => {
+                    if (msg.sender.id === authStore.user?.id && msg.id <= receiptData.last_read_message_id) {
+                        msg._isReadByRecipient = true;
+                    }
+                });
+            }
+            break;
+
+        case 'chat_unread_update':
+            const { chat_id: updatedChatIdUnread, unread_count } = wsData;
+            console.log(`[WS STORE] Unread count update for chat ${updatedChatIdUnread}: ${unread_count}`);
+            const chatToUpdateUnreadIdx = chats.value.findIndex(c => c.id === updatedChatIdUnread);
+            if (chatToUpdateUnreadIdx > -1) {
+                chats.value[chatToUpdateUnreadIdx].unread_count = unread_count;
+            }
+            if (currentChat.value?.id === updatedChatIdUnread) {
+                currentChat.value.unread_count = unread_count;
+            }
+            break;
+
+        case 'user_status_update':
+            const { user_id: statusUserId, status: onlineStatus, last_seen: lastSeenTimestamp } = wsData.data || {};
+            if (statusUserId !== undefined && onlineStatus !== undefined) {
+              console.log(`[WS STORE] User status update for user ${statusUserId}: ${onlineStatus}, last seen: ${lastSeenTimestamp}`);
+              userStatuses.value[statusUserId] = {
+                is_online: onlineStatus === 'online',
+                last_seen: onlineStatus === 'offline' ? lastSeenTimestamp || new Date().toISOString() : null,
+              };
+            }
+            break;
+        default:
+            console.warn(`[WS STORE] Unknown message type received: ${wsData.type}`, wsData);
+    }
+  }
+
+  async function fetchChats() {
+    isLoadingChats.value = true; error.value = null;
+    try {
+      const fetchedChats = await messagingApi.getChats();
+      chats.value = fetchedChats.sort((a, b) => {
+        const timeA = a.last_message_details?.timestamp ? new Date(a.last_message_details.timestamp).getTime() : (a.created_at ? new Date(a.created_at).getTime() : 0);
+        const timeB = b.last_message_details?.timestamp ? new Date(b.last_message_details.timestamp).getTime() : (b.created_at ? new Date(b.created_at).getTime() : 0);
+        return timeB - timeA;
+      });
+    } catch (err: any) { error.value = err.response?.data?.detail || err.message || 'Ошибка при загрузке чатов.'; throw err; }
+    finally { isLoadingChats.value = false; }
+  }
+
+  async function createChat(chatData: ChatRequest): Promise<Chat> {
+    isSendingMessage.value = true; error.value = null;
+    try {
+      const newChat = await messagingApi.createChat(chatData);
+      const existingChatIndex = chats.value.findIndex(c => c.id === newChat.id);
+      if (existingChatIndex === -1) chats.value.unshift(newChat);
+      else chats.value.splice(existingChatIndex, 1, newChat);
+      chats.value.sort((a, b) => {
+                  const timeA = a.last_message_details?.timestamp ? new Date(a.last_message_details.timestamp).getTime() : (a.created_at ? new Date(a.created_at).getTime() : 0);
+                  const timeB = b.last_message_details?.timestamp ? new Date(b.last_message_details.timestamp).getTime() : (b.created_at ? new Date(b.created_at).getTime() : 0);
+                  return timeB - timeA;
+              });
+      return newChat;
+    } catch (err: any) { error.value = err.response?.data?.detail || err.message || 'Ошибка при создании чата.'; throw err; }
+    finally { isSendingMessage.value = false; }
+  }
+
+  async function fetchMessages(chatPk: number, loadMore: boolean = false): Promise<number> {
+    if (!loadMore) {
+        messages.value = [];
+        // messagesPagination.value = { next: null, count: 0, previous: null }; // Если API вернет пагинацию
+        isLoadingMessages.value = true;
+    } else {
+        // if (!messagesPagination.value.previous) return 0; // Для пагинации
+        isLoadingMoreMessages.value = true;
+    }
+    error.value = null;
+    try {
+      const fetchedMessages = await messagingApi.getMessages(chatPk /*, params for pagination */);
+      const uiMessages: UIMessage[] = fetchedMessages.map(m => ({ ...m, _isDelivered: true }));
+      if (loadMore) messages.value = [...uiMessages.reverse(), ...messages.value];
+      else messages.value = uiMessages;
+      return uiMessages.length;
+    } catch (err: any) { error.value = err.response?.data?.detail || err.message || 'Ошибка загрузки сообщений.'; throw err; }
+    finally { isLoadingMessages.value = false; isLoadingMoreMessages.value = false; }
+  }
+
+  async function sendMessage(chatPk: number, messageDataInput: { content?: string | null; file?: File | Blob | null }): Promise<UIMessage> {
+    isSendingMessage.value = true; lastMessageIsMine.value = true; error.value = null;
+    const tempId = `temp_${Date.now()}`;
+    const authStore = useAuthStore();
+    if (!authStore.user) { isSendingMessage.value = false; lastMessageIsMine.value = false; throw new Error("User not authenticated."); }
+
+    const optimisticMessage: UIMessage = {
+        id: 0, _tempId: tempId, chat_id: chatPk, sender: authStore.user,
+        content: messageDataInput.content || '', file: undefined,
+        file_url: messageDataInput.file ? URL.createObjectURL(messageDataInput.file) : undefined,
+        timestamp: new Date().toISOString(),
+        mime_type: messageDataInput.file?.type || null,
+        file_size: messageDataInput.file?.size || null,
+        original_filename: messageDataInput.file instanceof File ? messageDataInput.file.name : null,
+        _isSending: true, _isDelivered: false,
+    };
+    messages.value.push(optimisticMessage);
+
+    try {
+        const sentMessageFromApi = await messagingApi.sendMessage(chatPk, messageDataInput);
+        const finalMessage: UIMessage = { ...sentMessageFromApi, _isDelivered: true, _isSending: false };
+        const messageIndex = messages.value.findIndex(m => m._tempId === tempId);
+        if (messageIndex > -1) messages.value.splice(messageIndex, 1, finalMessage);
+        else messages.value.push(finalMessage);
+        messages.value.sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+        if (currentChat.value && currentChat.value.id === chatPk) {
+            currentChat.value.last_message_details = finalMessage;
+            await markChatAsRead(chatPk);
+        }
+        const chatInListIdx = chats.value.findIndex(c => c.id === chatPk);
+        if (chatInListIdx > -1) {
+            const chatInList = { ...chats.value[chatInListIdx], last_message_details: finalMessage, unread_count: 0 };
+            chats.value.splice(chatInListIdx, 1, chatInList);
+            chats.value.sort((a, b) => {
+                  const timeA = a.last_message_details?.timestamp ? new Date(a.last_message_details.timestamp).getTime() : (a.created_at ? new Date(a.created_at).getTime() : 0);
+                  const timeB = b.last_message_details?.timestamp ? new Date(b.last_message_details.timestamp).getTime() : (b.created_at ? new Date(b.created_at).getTime() : 0);
+                  return timeB - timeA;
+              });
+        }
+        return finalMessage;
+    } catch (err: any) {
+        useGlobalNotificationStore().showErrorSnackbar('Ошибка отправки сообщения.');
+        const messageIndex = messages.value.findIndex(m => m._tempId === tempId);
+        if (messageIndex > -1) messages.value.splice(messageIndex, 1);
+        throw err;
+    } finally {
+        isSendingMessage.value = false; lastMessageIsMine.value = false;
+        if (optimisticMessage.file_url?.startsWith('blob:')) URL.revokeObjectURL(optimisticMessage.file_url);
+    }
+  }
+
+  async function openChat(chatId: number) {
+    if (currentChat.value?.id === chatId && wsStatus.value === 'open' && !isLoadingMessages.value) {
+        if ((currentChat.value.unread_count || 0) > 0) await markChatAsRead(chatId);
+        return;
+    }
+    isLoadingChats.value = true; isLoadingMessages.value = true; error.value = null;
+    if (chatWebSocket.value && currentWsChatId.value !== chatId && currentWsChatId.value !== null) disconnectWebSocket();
+    currentChat.value = null; messages.value = []; media.value = [];
+
+    try {
+        const chatDetailsPromise = messagingApi.getChatDetails(chatId);
+        const messagesPromise = fetchMessages(chatId); // fetchMessages обновляет messages.value
+        const [chatData] = await Promise.all([chatDetailsPromise, messagesPromise]);
+        currentChat.value = chatData;
+        connectWebSocket(chatId);
+        if (currentChat.value) await markChatAsRead(currentChat.value.id);
+    } catch (err: any) {
+        error.value = err.response?.data?.detail || 'Ошибка при загрузке чата.';
+        currentChat.value = null; messages.value = [];
+        if (err.response?.status === 404) { useGlobalNotificationStore().showErrorSnackbar('Чат не найден.'); router.push('/chats'); }
+    } finally { isLoadingChats.value = false; }
+  }
+
+  async function markChatAsRead(chatId: number) {
+    const chatInList = chats.value.find(c => c.id === chatId);
+    const currentUnreadInList = chatInList?.unread_count || 0;
+    const currentUnreadInCurrent = currentChat.value?.id === chatId ? (currentChat.value.unread_count || 0) : 0;
+
+    if (chatInList) chatInList.unread_count = 0;
+    if (currentChat.value && currentChat.value.id === chatId) currentChat.value.unread_count = 0;
+
+    try {
+      await apiClient.post(`/messaging/chats/${chatId}/mark-read/`, {});
+      console.log(`Chat ${chatId} successfully marked as read (API call sent).`);
+    } catch (err: any) {
+      console.error(`Error marking chat ${chatId} as read on API:`, err.response?.data || err.message);
+      if (chatInList) chatInList.unread_count = currentUnreadInList;
+      if (currentChat.value && currentChat.value.id === chatId) currentChat.value.unread_count = currentUnreadInCurrent;
+    }
+  }
+
+  async function fetchChatDetails(chatId: number): Promise<Chat | null> {
+   console.log(`[STORE fetchChatDetails] Called for chat ${chatId}. Current isLoadingChats: ${isLoadingChats.value}`);
+   isLoadingChats.value = true; // Используем основной флаг для простоты
+   error.value = null;
+   try {
+       console.log(`[STORE fetchChatDetails] Calling API for chat ${chatId}`);
+       const chatData = await messagingApi.getChatDetails(chatId);
+       console.log(`[STORE fetchChatDetails] API success for chat ${chatId}`, chatData);
+
+       // Важно: обновляем реактивные данные
+       currentChat.value = null; // Сначала сбрасываем
+      await nextTick(); // Даем Vue время "увидеть" null
+      currentChat.value = { ...chatData };
+       return chatData;
+   } catch (err:any) {
+       console.error(`[STORE fetchChatDetails] API Error for chat ${chatId}:`, err.response?.data || err.message);
+       error.value = err.response?.data?.detail || 'Ошибка загрузки деталей чата.';
+       // Если чат не найден (например, его только что удалили), currentChat может стать null
+       if (err.response?.status === 404 && currentChat.value?.id === chatId) {
+           currentChat.value = null; // Очищаем, если его больше нет
+       }
+       throw err; // Пробрасываем ошибку, чтобы UI мог отреагировать
+   } finally {
+       isLoadingChats.value = false;
+       console.log(`[STORE fetchChatDetails] Finished for chat ${chatId}. isLoadingChats: ${isLoadingChats.value}`);
+   }
+}
+
+  async function deleteChat(chatId: number) {
+    error.value = null;
+    try {
+      await messagingApi.deleteChat(chatId);
+      chats.value = chats.value.filter(chat => chat.id !== chatId);
+      if (currentChat.value?.id === chatId) {
+        currentChat.value = null; messages.value = []; media.value = []; disconnectWebSocket();
+      }
+    } catch (err: any) {
+      console.error(`Error deleting chat ${chatId}:`, err);
+      error.value = err.response?.data?.detail || 'Ошибка при удалении чата.';
+      throw err;
+    }
+  }
+
+  async function addParticipantToChat(chatId: number, userId: number): Promise<Chat | void> {
+   console.log(`MessagingStore: addParticipantToChat called with chatId: ${chatId}, userId: ${userId}`);
+   // Проверка на number для userId здесь не нужна, так как TypeScript уже должен это контролировать
+   // на уровне вызова из компонента (User.id должен быть number).
+   // Если user.id может быть строкой, то нужно `parseInt(user.id)` в компоненте.
+
+   error.value = null; // Сбрасываем предыдущую ошибку store
+   // Можно добавить специфический флаг загрузки, например, isUpdatingParticipants
+   // const currentIsUpdatingParticipants = ref(false);
+   // currentIsUpdatingParticipants.value = true;
+   try {
+       // Вызываем API. messagingApi.addParticipant уже отправляет { user_id: userId }
+       const updatedChat = await messagingApi.addParticipant(chatId, userId);
+
+       // Обновляем данные чата в локальном состоянии, если запрос успешен
+       if (currentChat.value?.id === chatId) {
+           currentChat.value = updatedChat; // Обновляем текущий открытый чат
+       }
+       const chatIndex = chats.value.findIndex(c => c.id === chatId);
+       if (chatIndex !== -1) {
+           chats.value.splice(chatIndex, 1, updatedChat); // Обновляем чат в общем списке
+       }
+       console.log(`MessagingStore: Participant ${userId} added to chat ${chatId}. Updated chat:`, updatedChat);
+       return updatedChat;
+   } catch (err: any) {
+       console.error(`MessagingStore: Error adding participant ${userId} to chat ${chatId}:`, err);
+       // Ошибка от API будет обработана интерцептором Axios и, возможно, показана глобально.
+       // Здесь мы можем сохранить специфичную для этой операции ошибку, если нужно.
+       const errorMessage = err.response?.data?.detail || err.response?.data?.error || 'Ошибка при добавлении участника.';
+       error.value = errorMessage; // Устанавливаем ошибку в store
+       // Пробрасываем ошибку дальше, чтобы компонент (AddParticipantDialog) мог на нее отреагировать
+       // и, например, не закрываться или показать сообщение внутри диалога.
+       throw err;
+   } finally {
+       // currentIsUpdatingParticipants.value = false;
+   }
+ }
+
+ async function leaveChat(chatId: number): Promise<void> {
+   // Можно добавить флаг isLoadingLeaveChat
+   error.value = null;
+   try {
+     await messagingApi.leaveChat(chatId); // Вызываем новый API метод
+
+     // После успешного выхода:
+     // 1. Удаляем чат из локального списка chats.value
+     chats.value = chats.value.filter(c => c.id !== chatId);
+
+     // 2. Если это был текущий открытый чат, сбрасываем его
+     if (currentChat.value?.id === chatId) {
+       currentChat.value = null;
+       messages.value = [];
+       media.value = [];
+       disconnectWebSocket(); // Отключаем WS для этого чата
+     }
+     console.log(`[STORE] User left chat ${chatId}.`);
+     // Редирект на список чатов будет в компоненте
+   } catch (err: any) {
+     console.error(`[STORE] Error leaving chat ${chatId}:`, err);
+     error.value = err.response?.data?.detail || err.response?.data?.error || 'Ошибка при выходе из чата.';
+     throw err; // Пробрасываем ошибку для обработки в UI
+   } finally {
+     // isLoadingLeaveChat = false;
+   }
+ }
+
+ // Удаляем/изменяем removeParticipantFromChat, чтобы он НЕ вызывал deleteChat для себя
+ async function removeParticipantFromChat(chatId: number, userIdToRemove: number): Promise<Chat | void> {
+   error.value = null;
+   try {
+     const updatedChat = await messagingApi.removeParticipant(chatId, userIdToRemove); // Этот метод для админа/создателя, удаляющего ДРУГОГО
+     
+     // Обновляем состояние
+     if (currentChat.value?.id === chatId) {
+       currentChat.value = updatedChat;
+     }
+     const chatIndex = chats.value.findIndex(c => c.id === chatId);
+     if (chatIndex !== -1) {
+       chats.value.splice(chatIndex, 1, updatedChat);
+     }
+     return updatedChat;
+   } catch (err: any) {
+     console.error(`[STORE] Error removing participant ${userIdToRemove} from chat ${chatId}:`, err);
+     error.value = err.response?.data?.error || err.response?.data?.detail || 'Ошибка удаления участника.';
+     throw err;
+   }
+ }
+
+
+  async function editMessage(chatPk: number, messageId: number, newContent: string): Promise<UIMessage | void> {
+    error.value = null;
+    const originalMessageIndex = messages.value.findIndex(m => m.id === messageId);
+    const originalMessage = originalMessageIndex > -1 ? { ...messages.value[originalMessageIndex] } : null;
+
+    if (originalMessageIndex > -1) {
+        messages.value[originalMessageIndex].content = newContent;
+        // messages.value[originalMessageIndex]._isSending = true; // Можно добавить флаг редактирования
+    }
+
+    try {
+        const updatedMessageData = await messagingApi.patchMessage(chatPk, messageId, { content: newContent });
+        const finalMessage: UIMessage = { ...updatedMessageData, _isDelivered: true, _isSending: false };
+        if (originalMessageIndex > -1) {
+            messages.value.splice(originalMessageIndex, 1, finalMessage);
+        }
+        if (currentChat.value?.last_message_details?.id === messageId) currentChat.value.last_message_details = finalMessage;
+        const chatInList = chats.value.find(c => c.last_message_details?.id === messageId);
+        if (chatInList) chatInList.last_message_details = finalMessage;
+        return finalMessage;
+    } catch (err: any) {
+        console.error(`Error editing message ${messageId}:`, err);
+        if (originalMessageIndex > -1 && originalMessage) {
+            messages.value.splice(originalMessageIndex, 1, originalMessage);
+        }
+        error.value = err.response?.data?.detail || 'Ошибка редактирования сообщения.';
+        throw err;
+    }
+  }
+
+  async function deleteMessage(chatPk: number, messageId: number): Promise<void> {
+    error.value = null;
+    const originalMessages = [...messages.value];
+    messages.value = messages.value.filter(m => m.id !== messageId);
+
+    try {
+        await messagingApi.deleteMessage(chatPk, messageId);
+        if (currentChat.value?.last_message_details?.id === messageId) {
+             fetchChatDetails(chatPk); // Обновить, чтобы получить актуальное последнее сообщение
+        }
+    } catch (err: any) {
+        console.error(`Error deleting message ${messageId}:`, err);
+        messages.value = originalMessages;
+        error.value = err.response?.data?.detail || 'Ошибка удаления сообщения.';
+        throw err;
+    }
+  }
+  async function updateChatName(chatId: number, newName: string): Promise<Chat | void> {
+   error.value = null;
+   // const oldName = currentChat.value?.name; // Для отката, если нужно
+   try {
+     const updatedChat = await messagingApi.patchChat(chatId, { name: newName }); // Предполагаем, что patchChat есть и принимает {name: ...}
+     if (currentChat.value?.id === chatId) {
+       currentChat.value = updatedChat;
+     }
+     const chatIndex = chats.value.findIndex(c => c.id === chatId);
+     if (chatIndex !== -1) {
+       chats.value[chatIndex] = updatedChat;
+     }
+     // Пересортировка списка чатов, если имя влияет на display_name и сортировку
+     chats.value.sort((a, b) => {
+      const timeA = a.last_message_details?.timestamp ? new Date(a.last_message_details.timestamp).getTime() : (a.created_at ? new Date(a.created_at).getTime() : 0);
+      const timeB = b.last_message_details?.timestamp ? new Date(b.last_message_details.timestamp).getTime() : (b.created_at ? new Date(b.created_at).getTime() : 0);
+      return timeB - timeA;
+  });
+     return updatedChat;
+   } catch (err: any) {
+     console.error(`Error updating chat name for chat ${chatId}:`, err);
+     error.value = err.response?.data?.detail || 'Ошибка обновления названия чата.';
+     throw err;
+   }
+ }
+
+  return {
+   chats, currentChat, messages, media,
+   isLoadingChats, isLoadingMessages, isLoadingMoreMessages, isLoadingMedia, isSendingMessage,
+   error, messagesPagination, wsStatus, lastMessageIsMine, userStatuses,
+   getChatById, getUserStatus,
+   fetchChats, createChat, fetchMessages, sendMessage,
+   openChat, disconnectWebSocket, markChatAsRead, fetchChatDetails,
+   deleteChat, addParticipantToChat, removeParticipantFromChat,
+   editMessage, deleteMessage, updateChatName,leaveChat
+ };
+});

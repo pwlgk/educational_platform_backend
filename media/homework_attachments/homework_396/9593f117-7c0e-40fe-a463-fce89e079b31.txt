@@ -1,0 +1,271 @@
+// src/stores/useAttendanceStore.ts
+import { defineStore } from 'pinia';
+import { ref } from 'vue';
+import { eduCoreApi } from '@/api/eduCore.api';
+import type { Attendance, AttendanceRequest, PatchedAttendanceRequest, StatusEnum } from '@/types';
+import { useGlobalNotificationStore } from './globalNotification';
+import { useJournalEntryStore } from './useJournalEntryStore'; // Для получения/создания journal_entry_id
+
+interface AttendanceFilters {
+    journal_entry?: number; // Фильтр по ID записи журнала урока
+    journal_entry__lesson?: number; // Фильтр по ID урока (через запись журнала)
+    journal_entry__lesson__start_time__date?: string; // YYYY-MM-DD
+    journal_entry__lesson__start_time__date__gte?: string;
+    journal_entry__lesson__start_time__date__lte?: string;
+    ordering?: string;
+    status?: StatusEnum;
+    status__in?: StatusEnum[];
+    student?: number;
+    // Дополнительные фильтры, если нужны для контекста журнала
+    // (например, groupId, subjectId, periodId, которые помогут на бэке найти нужные journal_entries)
+    student_group_id?: number;
+    subject_id?: number;
+    study_period_id?: number;
+}
+
+export const useAttendanceStore = defineStore('attendance', () => {
+    const notificationStore = useGlobalNotificationStore();
+    const journalEntryStore = useJournalEntryStore(); // Для работы с LessonJournalEntry
+
+    const attendances = ref<Attendance[]>([]); // Хранит загруженные записи посещаемости
+    const isLoading = ref(false);
+    const error = ref<string | null>(null);
+    // Не храним currentFilters здесь, т.к. загрузка обычно происходит в контексте (например, для урока или группы)
+
+    /**
+     * @description Загружает записи посещаемости по заданным фильтрам.
+     * Обычно вызывается для загрузки всех посещений для конкретного урока (через journal_entry_id)
+     * или для контекста (группа, предмет, период), если API это поддерживает.
+     */
+    async function fetchAttendances(filters: AttendanceFilters): Promise<void> {
+        isLoading.value = true;
+        error.value = null;
+        console.log('[AttendanceStore] Fetching attendances with filters:', filters);
+        try {
+            attendances.value = await eduCoreApi.eduCoreManagementAttendancesList(filters);
+        } catch (err: any) {
+            error.value = err.response?.data?.detail || err.message || "Не удалось загрузить данные о посещаемости";
+            console.error("Ошибка при загрузке посещаемости:", err);
+            attendances.value = [];
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+    /**
+     * @description Загружает или получает посещаемость для конкретного студента и урока.
+     * Используется для получения одной записи.
+     */
+    async function getStudentAttendanceForLesson(lessonId: number, studentId: number): Promise<Attendance | undefined> {
+        // Сначала ищем в уже загруженных данных
+        const existing = attendances.value.find(
+            att => att.lesson_id === lessonId && att.student_details.id === studentId // Предполагаем, что Attendance содержит lesson_id и student_details.id
+        );
+        if (existing) return existing;
+
+        // Если не найдено, и нам нужен один конкретный, можно попробовать загрузить его,
+        // но для этого нужен journal_entry_id.
+        // Проще загружать все посещения для урока (journal_entry) один раз.
+        // Эта функция больше для удобства доступа к уже загруженным данным.
+        console.warn(`[AttendanceStore] Attendance for lesson ${lessonId}, student ${studentId} not found in local store. Fetch all for lesson first.`);
+        return undefined;
+    }
+
+
+    /**
+     * @description Сохраняет (создает или обновляет) запись о посещаемости.
+     * Требует lessonId для поиска/создания LessonJournalEntry.
+     */
+    async function saveAttendance(payload: {
+        attendanceId?: number; // ID существующей записи Attendance для обновления
+        lessonId: number;      // ID урока
+        studentId: number;
+        status: StatusEnum | null; // null для удаления/сброса статуса
+        comment?: string;
+    }): Promise<Attendance | null> {
+        isLoading.value = true;
+        error.value = null;
+
+        try {
+            // 1. Получить или создать LessonJournalEntry для данного lessonId
+            // Используем action из journalEntryStore. Он должен вернуть существующую или создать новую.
+            // Если тема/заметки урока не введены, createOrGetJournalEntry должен уметь создать "пустую" запись.
+            let journalEntry = journalEntryStore.journalEntries.find(je => je.lesson_details?.id === payload.lessonId);
+            if (!journalEntry) {
+                // Пытаемся создать/загрузить, если его нет.
+                // Это может быть сложной логикой, если JournalEntry требует тему.
+                // Предположим, у нас есть метод, который это делает.
+                // Или, более простой вариант: JournalTab при открытии урока создает/загружает JournalEntry.
+                // Здесь мы просто ищем его.
+                console.warn(`[AttendanceStore] JournalEntry for lesson ${payload.lessonId} not found in store. Attempting to fetch/create.`);
+                journalEntry = await journalEntryStore.fetchOrCreateJournalEntryForLesson(payload.lessonId); // Этот метод должен вернуть LessonJournalEntry
+            }
+
+            if (!journalEntry?.id) {
+                throw new Error(`Не удалось найти или создать запись в журнале для урока ID ${payload.lessonId}. Посещаемость не может быть отмечена.`);
+            }
+
+            const requestData: AttendanceRequest | PatchedAttendanceRequest = {
+                journal_entry: journalEntry.id,
+                student: payload.studentId,
+                status: payload.status!, // Статус обязателен для AttendanceRequest (кроме случая удаления)
+                comment: payload.comment || undefined,
+            };
+
+            let savedAttendance: Attendance | null = null;
+
+            if (payload.attendanceId) { // Обновление существующей
+                if (payload.status === null) { // Если статус сбрасывается на null, это может означать удаление записи
+                    await eduCoreApi.eduCoreManagementAttendancesDestroy(payload.attendanceId);
+                    // Удаляем из локального списка
+                    attendances.value = attendances.value.filter(a => a.id !== payload.attendanceId);
+                    notificationStore.showSuccessSnackbar('Статус посещаемости сброшен.');
+                    return null; // Возвращаем null, так как запись удалена
+                } else {
+                    savedAttendance = await eduCoreApi.eduCoreManagementAttendancesPartialUpdate(payload.attendanceId, requestData as PatchedAttendanceRequest);
+                }
+            } else { // Создание новой
+                if (payload.status === null) { // Если статус null при создании, ничего не делаем
+                    notificationStore.showInfoSnackbar("Статус посещаемости не выбран, запись не создана.");
+                    return null;
+                }
+                savedAttendance = await eduCoreApi.eduCoreManagementAttendancesCreate(requestData as AttendanceRequest);
+            }
+
+            if (savedAttendance) {
+                // Обновляем или добавляем в локальный список
+                const index = attendances.value.findIndex(a => a.id === savedAttendance!.id);
+                if (index !== -1) {
+                    attendances.value[index] = savedAttendance;
+                } else {
+                    attendances.value.push(savedAttendance);
+                }
+                notificationStore.showSuccessSnackbar('Посещаемость обновлена!');
+            }
+            return savedAttendance;
+
+        } catch (err: any) {
+            const message = err.response?.data?.detail || JSON.stringify(err.response?.data) || err.message || "Не удалось сохранить посещаемость";
+            error.value = message;
+            notificationStore.showErrorSnackbar(message);
+            console.error("Ошибка при сохранении посещаемости:", err);
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+    /**
+     * @description Пакетная отметка посещаемости.
+     * @param data - Данные для пакетной отметки. Обычно это journal_entry_id и массив студентов со статусами.
+     * API /edu-core/management/attendances/batch-mark/ ожидает AttendanceRequest,
+     * но это может быть неэффективно для пакетной отметки.
+     * Уточните формат данных для batch-mark.
+     * Если он принимает список объектов (student_id, status, comment), нужно будет создать соответствующий тип.
+     * Пока предположим, что он принимает один AttendanceRequest и бэкенд применяет его ко всем студентам группы для этого journal_entry.
+     * Либо он принимает { journal_entry: number, students: [{ student: number, status: StatusEnum, comment?: string }] }
+     */
+    async function batchMarkAttendances(journalEntryId: number, studentStatuses: Array<{ studentId: number; status: StatusEnum; comment?: string }>): Promise<Attendance[]> {
+        isLoading.value = true;
+        error.value = null;
+        // Это пример, если API ожидает массив отдельных запросов или специальный формат
+        // Реальная реализация зависит от вашего API /batch-mark/
+        const results: Attendance[] = [];
+        try {
+            // Вариант 1: если batch-mark принимает один статус для всех в journal_entry
+            // (маловероятно, но возможно, если в AttendanceRequest передать только journal_entry и status)
+            // const commonStatusData: AttendanceRequest = { journal_entry: journalEntryId, student: -1, status: ... };
+            // const result = await eduCoreApi.eduCoreManagementAttendancesBatchMarkCreate(commonStatusData);
+            // results.push(result);
+
+            // Вариант 2: если batch-mark принимает массив объектов (более вероятно)
+            // Это потребует изменения eduCoreApi.eduCoreManagementAttendancesBatchMarkCreate
+            // чтобы он принимал { journal_entry: number, default_status: StatusEnum, attendances: [{student_id: number, status?: StatusEnum, comment?: string}] }
+            // или что-то подобное.
+            // Пока заглушка:
+            console.warn("batchMarkAttendances: API for batch marking needs clarification. Simulating individual calls.");
+            for (const item of studentStatuses) {
+                 const saved = await saveAttendance({ lessonId: -1, /*Не нужен, т.к. есть journalEntryId*/ studentId: item.studentId, status: item.status, comment: item.comment });
+                 if (saved) results.push(saved);
+            }
+
+            notificationStore.showSuccessSnackbar('Посещаемость пакетно обновлена!');
+            // После пакетной отметки, перезагружаем все для текущего контекста,
+            // так как могли измениться несколько записей.
+            // Это зависит от того, какие фильтры активны в UI.
+            // Например, если мы в контексте одного урока (journal_entry_id):
+            await fetchAttendances({ journal_entry: journalEntryId });
+            return results;
+        } catch (err: any) {
+            error.value = err.response?.data?.detail || err.message || "Ошибка при пакетной отметке посещаемости";
+            notificationStore.showErrorSnackbar(error.value);
+            throw err;
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+
+    /**
+     * @description Загружает все записи посещаемости для определенного контекста,
+     * например, для всех занятий группы по предмету за период.
+     * Это вспомогательная функция для JournalTab.
+     */
+    async function fetchAttendancesForContext(
+        studentGroupId: number,
+        studyPeriodId: number,
+        subjectId: number,
+        teacherId?: number // Если учитель просматривает только свои занятия
+    ): Promise<void> {
+        isLoading.value = true;
+        error.value = null;
+        try {
+            // API /edu-core/management/attendances/ позволяет фильтровать по:
+            // journal_entry__lesson__student_group
+            // journal_entry__lesson__study_period (нет такого фильтра в API spec, но логично было бы)
+            // journal_entry__lesson__subject
+            // journal_entry__lesson__teacher
+            // Пока используем то, что есть, но для точного контекста нужны будут все эти фильтры на бэкенде.
+            // Предположим, что бэкенд может отфильтровать по этим параметрам, если передать их в lesson.
+            const filters: AttendanceFilters = {
+                // Эти фильтры будут применены к Lesson через JournalEntry
+                // Необходимо, чтобы ваш бэкенд поддерживал такую вложенную фильтрацию для Attendance.
+                // Например: ?journal_entry__lesson__student_group=X&journal_entry__lesson__subject=Y...
+                // Если нет, то нужно получать ID всех LessonJournalEntry для контекста и фильтровать по journal_entry__in.
+
+                // ВАЖНО: Проверьте, как ваш API /attendances/ LIST поддерживает фильтрацию по контексту урока.
+                // Если он не может фильтровать по student_group, subject, study_period через lesson,
+                // то этот подход не сработает, и нужно будет загружать посещаемость для каждого урока отдельно.
+
+                // Заглушка: пока загружаем все и фильтруем на клиенте или полагаемся, что
+                // JournalTable передаст уже отфильтрованные ID уроков (journal_entry__in).
+                // Для простоты, пусть JournalTab передает сюда конкретные journal_entry_id (или массив)
+                // lessonsForJournal.map(l => l.journal_entry_id)
+            };
+            console.warn("[AttendanceStore] fetchAttendancesForContext: API filtering capabilities need verification for context-based loading.");
+            // attendances.value = await eduCoreApi.eduCoreManagementAttendancesList(filters);
+            // Вместо этого, JournalTab будет вызывать fetchAttendances с конкретными journal_entry ID,
+            // или мы загрузим все для группы/периода и отфильтруем на клиенте.
+            // Пока оставим пустым, так как логика загрузки будет в JournalTab.
+            attendances.value = []; // Очищаем, т.к. загрузка будет по конкретным journal_entry
+
+        } catch (err: any) {
+            error.value = err.response?.data?.detail || err.message || "Не удалось загрузить посещаемость для контекста";
+            attendances.value = [];
+        } finally {
+            isLoading.value = false;
+        }
+    }
+
+
+    return {
+        attendances,
+        isLoading,
+        error,
+        fetchAttendances,
+        getStudentAttendanceForLesson,
+        saveAttendance,
+        batchMarkAttendances,
+        fetchAttendancesForContext, // Если будет использоваться для предзагрузки
+    };
+});

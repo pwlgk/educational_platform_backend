@@ -1,7 +1,7 @@
 import os
 import django
 from channels.routing import ProtocolTypeRouter, URLRouter
-from monitor.middleware import JwtAuthMiddlewareStack 
+from .middleware import JwtAuthMiddlewareStack 
 from django.core.asgi import get_asgi_application
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'server_api.settings')
