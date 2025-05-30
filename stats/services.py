@@ -1,10 +1,8 @@
-# stats/services.py
-
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal # Импорт для точного округления Decimal
 import logging
 from django.db.models import Avg, Count, Sum, F, ExpressionWrapper, fields, Q, Case, When, Value
 from django.utils import timezone
-from datetime import timedelta, date
+from datetime import timedelta, date # date импортирован для использования в HomeworkStatsService
 from django.conf import settings 
 
 from users.models import User
@@ -12,24 +10,31 @@ from edu_core.models import (
     Lesson, StudentGroup, Subject, Grade, Attendance, Homework, HomeworkSubmission, 
     AcademicYear, StudyPeriod, CurriculumEntry
 )
-from messaging.models import Chat, Message
-from notifications.models import Notification
-# from django.contrib.contenttypes.models import ContentType # Если будете использовать
-from django.db.models import Prefetch
-from django.utils.translation import gettext_lazy as _
+from messaging.models import Chat, Message # Модели из модуля messaging
+from notifications.models import Notification # Модель из модуля notifications
+from django.db.models import Prefetch # Prefetch для оптимизации запросов
+from django.utils.translation import gettext_lazy as _ # Для интернационализации строк
+
 logger = logging.getLogger(__name__)
 
+# Сервисная функция для получения текущего активного учебного года.
+# Возвращает первый найденный объект AcademicYear с флагом is_current=True.
 def get_active_academic_year_service():
     return AcademicYear.objects.filter(is_current=True).first()
 
+# Класс PlatformStatsService предоставляет методы для сбора общей статистики по платформе.
 class PlatformStatsService:
+    # Возвращает количество пользователей, сгруппированных по ролям.
     def get_user_counts_by_role(self):
         return list(User.objects.values('role').annotate(count=Count('id')).order_by('role'))
 
+    # Возвращает количество пользователей, зарегистрированных за последние `days_ago` дней.
     def get_recent_registrations(self, days_ago=7):
         start_date = timezone.now() - timedelta(days=days_ago)
         return User.objects.filter(date_joined__gte=start_date).count()
 
+    # Возвращает примерное количество активных пользователей (тех, кто логинился
+    # за последние `minutes_ago` минут). Требует наличия поля `last_login` в модели User.
     def get_active_users_approx(self, minutes_ago=15):
         if not hasattr(User, 'last_login'):
             logger.warning("Поле 'last_login' отсутствует в модели User для статистики активности.")
@@ -37,16 +42,19 @@ class PlatformStatsService:
         threshold = timezone.now() - timedelta(minutes=minutes_ago)
         return User.objects.filter(is_active=True, last_login__gte=threshold).count()
 
+    # Возвращает количество онлайн-пользователей, отслеживаемых через Redis (предполагается
+    # интеграция с Django Channels и Redis для отслеживания онлайн-статуса).
+    # Требует установленной библиотеки 'redis'.
     def get_online_users_via_channels(self):
         try:
-            import redis
+            import redis # Попытка импорта redis
             r = redis.Redis(
                 host=getattr(settings, 'REDIS_HOST', '127.0.0.1'),
                 port=getattr(settings, 'REDIS_PORT', 6379),
                 password=getattr(settings, 'REDIS_PASSWORD', None),
                 db=getattr(settings, 'REDIS_DB', 0)
             )
-            online_count = r.scard('online_users_platform')
+            online_count = r.scard('online_users_platform') # 'online_users_platform' - ключ в Redis
             return online_count
         except ImportError:
             logger.warning("Библиотека 'redis' не установлена. Статистика онлайн пользователей через Channels недоступна.")
@@ -55,6 +63,8 @@ class PlatformStatsService:
             logger.error(f"Ошибка получения онлайн пользователей из Redis: {e}")
             return {"error": "Не удалось получить данные об онлайн пользователях."}
 
+    # Возвращает сводку по активности в мессенджере за последние `days_ago` дней:
+    # количество созданных чатов, отправленных сообщений и активных чатов.
     def get_messaging_activity_summary(self, days_ago=7):
         start_date = timezone.now() - timedelta(days=days_ago)
         total_chats_created = Chat.objects.filter(created_at__gte=start_date).count()
@@ -67,6 +77,8 @@ class PlatformStatsService:
             "active_chats_count": active_chats_count,
         }
 
+    # Возвращает статистику по уведомлениям за последние `days_ago` дней:
+    # общее количество отправленных, прочитанных, процент прочитанных и распределение по типам.
     def get_notification_stats(self, days_ago=7):
         start_date = timezone.now() - timedelta(days=days_ago)
         notifications_sent = Notification.objects.filter(created_at__gte=start_date)
@@ -81,15 +93,20 @@ class PlatformStatsService:
             "sent_by_type": by_type,
         }
 
+# Класс TeacherLoadStatsService предоставляет методы для расчета и получения статистики
+# по учебной нагрузке преподавателей.
 class TeacherLoadStatsService:
+    # Возвращает детализированную информацию о нагрузке конкретного преподавателя.
+    # Фильтруется по ID учебного года и/или ID учебного периода.
+    # Рассчитывает общие запланированные часы, детализацию по предметам/группам,
+    # количество и общую продолжительность проведенных занятий, а также процент выполнения нагрузки.
     def get_teacher_load_details(self, teacher_id, academic_year_id=None, study_period_id=None):
-        try:
-            teacher = User.objects.get(pk=teacher_id, role=User.Role.TEACHER)
-        except User.DoesNotExist:
-            return {"error": _("Преподаватель не найден.")}
+        try: teacher = User.objects.get(pk=teacher_id, role=User.Role.TEACHER)
+        except User.DoesNotExist: return {"error": _("Преподаватель не найден.")}
+        
         planned_hours_filter = Q(teacher=teacher)
         scheduled_lessons_filter = Q(teacher=teacher)
-        target_study_period = None
+        
         if study_period_id:
             target_study_period = StudyPeriod.objects.filter(pk=study_period_id).first()
             if not target_study_period: return {"error": _("Учебный период не найден.")}
@@ -120,29 +137,18 @@ class TeacherLoadStatsService:
             'load_percentage': round((total_scheduled_hours / total_planned_hours) * 100, 1) if total_planned_hours > 0 else 0,
         }
 
+    # Возвращает сводную информацию о нагрузке для всех преподавателей.
+    # Фильтруется по ID учебного года и/или ID учебного периода.
+    # Для каждого преподавателя агрегирует общие запланированные часы, количество проведенных занятий,
+    # общую продолжительность проведенных занятий и процент выполнения нагрузки.
     def get_all_teachers_summary_load(self, academic_year_id=None, study_period_id=None):
-        """Сводная нагрузка для ВСЕХ преподавателей."""
-        
-        # --- ДОБАВЛЕНА ПРОВЕРКА В СЕРВИСЕ (ОПЦИОНАЛЬНО) ---
-        # Если View передает None для обоих, и мы хотим, чтобы сервис этого не допускал:
-        # if not academic_year_id and not study_period_id:
-        #     logger.warning("TeacherLoadStatsService.get_all_teachers_summary_load: academic_year_id or study_period_id is required.")
-        #     return {"error": _("Необходимо указать учебный год или учебный период для расчета нагрузки.")}
-        # Однако, если мы хотим, чтобы View сам решал, использовать ли активный год,
-        # то эта проверка здесь не нужна, и сервис будет считать за все время, если фильтры None.
-        # Оставим текущую логику, где View решает передавать ID активного года.
-        # --- КОНЕЦ ОПЦИОНАЛЬНОЙ ПРОВЕРКИ ---
-
         teachers = User.objects.filter(role=User.Role.TEACHER).order_by('last_name', 'first_name')
         results = []
         for teacher in teachers:
-            # Для каждого учителя вызываем детальный расчет, но берем только общие цифры
-            # Передаем academic_year_id и study_period_id, которые могут быть None
             details = self.get_teacher_load_details(teacher.id, academic_year_id, study_period_id)
-            if "error" not in details: # Пропускаем учителей, для которых произошла ошибка в get_teacher_load_details
+            if "error" not in details:
                 results.append({
-                    'teacher_id': details['teacher_id'],
-                    'teacher_name': details['teacher_name'],
+                    'teacher_id': details['teacher_id'], 'teacher_name': details['teacher_name'],
                     'total_planned_hours': details['total_planned_hours'],
                     'total_scheduled_lessons': details['total_scheduled_lessons'],
                     'total_scheduled_hours': details['total_scheduled_hours'],
@@ -150,27 +156,25 @@ class TeacherLoadStatsService:
                 })
         return results
 
+# Класс StudentPerformanceStatsService предоставляет методы для расчета и получения
+# статистики по успеваемости студентов.
 class StudentPerformanceStatsService:
+    # Вспомогательный метод для расчета средневзвешенной оценки на основе QuerySet'а оценок.
+    # Учитывает числовое значение оценки (`numeric_value`) и ее вес (`weight`).
+    # Возвращает кортеж (средневзвешенная оценка Decimal, количество учтенных оценок).
     def _calculate_weighted_average(self, grades_queryset):
-        if not grades_queryset.exists():
-            return None, 0
-        
+        if not grades_queryset.exists(): return None, 0
         aggregation = grades_queryset.filter(weight__gt=0).aggregate(
-            weighted_sum=Sum(F('numeric_value') * F('weight')), # numeric_value - Decimal, weight - Integer/Decimal
-            total_weight=Sum('weight')
+            weighted_sum=Sum(F('numeric_value') * F('weight')), total_weight=Sum('weight')
         )
         count_with_numeric = grades_queryset.filter(numeric_value__isnull=False).count()
-
-        # Результат Sum(Decimal * Decimal) будет Decimal. Sum(Integer) - Integer.
-        # Если weight может быть Decimal, то total_weight тоже Decimal.
-        # Если numeric_value - Decimal, а weight - Integer, то numeric_value * weight будет Decimal.
-        
         if aggregation['total_weight'] and aggregation['total_weight'] > 0:
-            # Деление Decimal на Decimal/Integer дает Decimal
             avg_decimal = (Decimal(str(aggregation['weighted_sum'])) / Decimal(str(aggregation['total_weight']))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             return avg_decimal, count_with_numeric
         return None, count_with_numeric
 
+    # Возвращает успеваемость конкретного студента по всем предметам в указанном учебном периоде.
+    # Для каждого предмета рассчитывается средневзвешенная оценка и количество оценок.
     def get_student_performance_by_subject(self, student_id, study_period_id):
         try: student = User.objects.get(pk=student_id, role=User.Role.STUDENT)
         except User.DoesNotExist: return {"error": _("Студент не найден.")}
@@ -185,67 +189,40 @@ class StudentPerformanceStatsService:
             results.append({'subject_id': subject.id, 'subject_name': subject.name, 'average_grade': avg_grade, 'grades_count': num_grades})
         return results
 
+    # Возвращает сводную информацию об успеваемости для указанной учебной группы в учебном периоде.
+    # Включает общую среднюю оценку по группе, процент студентов, преодолевших порог успеваемости,
+    # и детализацию успеваемости для каждого студента группы.
     def get_group_performance_summary(self, student_group_id, study_period_id, passing_threshold=3.0):
-        try:
-            group = StudentGroup.objects.get(pk=student_group_id)
-        except StudentGroup.DoesNotExist:
-            return {"error": _("Группа не найдена.")}
-
+        try: group = StudentGroup.objects.get(pk=student_group_id)
+        except StudentGroup.DoesNotExist: return {"error": _("Группа не найдена.")}
         students_in_group = group.students.filter(role=User.Role.STUDENT)
-        if not students_in_group.exists():
-            return {'group_name': group.name, 'average_grade': None, 'passing_percentage': None, 'student_count': 0}
-
-        passing_students_count = 0
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-        total_average_grade_sum = Decimal('0.0') # Инициализируем как Decimal
-        students_with_grades_count = 0
+        if not students_in_group.exists(): return {'group_name': group.name, 'average_grade': None, 'passing_percentage': None, 'student_count': 0}
         
-        student_details_list = []
-        passing_threshold_decimal = Decimal(str(passing_threshold)) # Преобразуем порог в Decimal
+        passing_students_count = 0; total_average_grade_sum = Decimal('0.0'); students_with_grades_count = 0
+        student_details_list = []; passing_threshold_decimal = Decimal(str(passing_threshold))
 
         for student in students_in_group:
-            grades_for_student_period = Grade.objects.filter(
-                student=student,
-                study_period_id=study_period_id,
-                numeric_value__isnull=False
-                # weight__gt=0 # Уже учтено в _calculate_weighted_average
-            )
-            # _calculate_weighted_average должен возвращать Decimal или None
+            grades_for_student_period = Grade.objects.filter(student=student, study_period_id=study_period_id, numeric_value__isnull=False)
             student_avg_decimal, num_grades = self._calculate_weighted_average(grades_for_student_period) 
-            
-            student_details_list.append({
-                'student_id': student.id,
-                'student_name': student.get_full_name(),
-                # Преобразуем в float для JSON, если нужно, или оставляем Decimal, если сериализатор справится
-                'average_grade': float(student_avg_decimal) if student_avg_decimal is not None else None, 
-                'grades_count': num_grades
-            })
-
+            student_details_list.append({'student_id': student.id, 'student_name': student.get_full_name(), 'average_grade': float(student_avg_decimal) if student_avg_decimal is not None else None, 'grades_count': num_grades})
             if student_avg_decimal is not None:
-                # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-                total_average_grade_sum += student_avg_decimal # Складываем Decimal с Decimal
-                students_with_grades_count += 1
-                if student_avg_decimal >= passing_threshold_decimal: # Сравниваем Decimal с Decimal
-                    passing_students_count += 1
+                total_average_grade_sum += student_avg_decimal; students_with_grades_count += 1
+                if student_avg_decimal >= passing_threshold_decimal: passing_students_count += 1
         
-        overall_group_avg_decimal = None
-        if students_with_grades_count > 0:
-            overall_group_avg_decimal = (total_average_grade_sum / Decimal(students_with_grades_count)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
+        overall_group_avg_decimal = (total_average_grade_sum / Decimal(students_with_grades_count)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if students_with_grades_count > 0 else None
         passing_percentage = round((passing_students_count / students_in_group.count()) * 100, 1) if students_in_group.count() > 0 else 0.0
 
         return {
-            'group_id': group.id,
-            'group_name': group.name,
-            'study_period_id': study_period_id,
-            # Преобразуем в float для JSON ответа
+            'group_id': group.id, 'group_name': group.name, 'study_period_id': study_period_id,
             'overall_average_grade': float(overall_group_avg_decimal) if overall_group_avg_decimal is not None else None,
-            'passing_students_percentage': passing_percentage,
-            'total_students_in_group': students_in_group.count(),
-            'students_counted_for_average': students_with_grades_count,
-            'students_details': student_details_list
+            'passing_students_percentage': passing_percentage, 'total_students_in_group': students_in_group.count(),
+            'students_counted_for_average': students_with_grades_count, 'students_details': student_details_list
         }
 
+    # Возвращает список студентов, чья средняя успеваемость в указанном учебном периоде
+    # выше или ниже заданного порога (`threshold`).
+    # `above_threshold=True` для студентов выше порога, `False` - ниже.
+    # `limit` ограничивает количество возвращаемых студентов.
     def get_students_by_performance_threshold(self, study_period_id, threshold, above_threshold=False, limit=None):
         all_grades_in_period = Grade.objects.filter(study_period_id=study_period_id, numeric_value__isnull=False, weight__gt=0)\
             .values('student_id', 'student__first_name', 'student__last_name')\
@@ -256,30 +233,32 @@ class StudentPerformanceStatsService:
         if limit: filtered_students = filtered_students[:limit]
         return list(filtered_students.values('student_id', 'student__first_name', 'student__last_name', 'student_avg_grade'))
 
+# Класс AttendanceStatsService предоставляет методы для расчета и получения
+# статистики по посещаемости.
 class AttendanceStatsService:
-    # --- ДОБАВЛЕННЫЙ МЕТОД ---
+    # Возвращает общий процент посещаемости по всем записям в указанном
+    # учебном году или периоде.
     def get_overall_attendance_percentage(self, academic_year_id=None, study_period_id=None):
         base_qs = Attendance.objects.all()
-        if study_period_id:
-            base_qs = base_qs.filter(journal_entry__lesson__study_period_id=study_period_id)
-        elif academic_year_id:
-            base_qs = base_qs.filter(journal_entry__lesson__study_period__academic_year_id=academic_year_id)
+        if study_period_id: base_qs = base_qs.filter(journal_entry__lesson__study_period_id=study_period_id)
+        elif academic_year_id: base_qs = base_qs.filter(journal_entry__lesson__study_period__academic_year_id=academic_year_id)
         total_records = base_qs.count()
         if total_records == 0: return None
         present_count = base_qs.filter(status__in=[Attendance.Status.PRESENT, Attendance.Status.LATE, Attendance.Status.REMOTE]).count()
         return round((present_count / total_records) * 100, 1)
 
-    # --- ДОБАВЛЕННЫЙ МЕТОД ---
+    # Возвращает топ `limit` студентов с наибольшим количеством пропусков по неуважительной причине
+    # в указанном учебном году или периоде.
     def get_top_absent_students(self, limit=10, academic_year_id=None, study_period_id=None):
         base_qs = Attendance.objects.filter(status=Attendance.Status.ABSENT_INVALID)
-        if study_period_id:
-            base_qs = base_qs.filter(journal_entry__lesson__study_period_id=study_period_id)
-        elif academic_year_id:
-            base_qs = base_qs.filter(journal_entry__lesson__study_period__academic_year_id=academic_year_id)
+        if study_period_id: base_qs = base_qs.filter(journal_entry__lesson__study_period_id=study_period_id)
+        elif academic_year_id: base_qs = base_qs.filter(journal_entry__lesson__study_period__academic_year_id=academic_year_id)
         absences = base_qs.values('student', 'student__first_name', 'student__last_name')\
             .annotate(absent_count=Count('id')).order_by('-absent_count')[:limit]
         return list(absences)
     
+    # Возвращает сводку по посещаемости для конкретного студента в указанном учебном периоде.
+    # Включает количество посещенных занятий, процент посещаемости и распределение по статусам.
     def get_student_attendance_summary(self, student_id, study_period_id):
         try: student = User.objects.get(pk=student_id, role=User.Role.STUDENT)
         except User.DoesNotExist: return {"error": _("Студент не найден.")}
@@ -295,6 +274,8 @@ class AttendanceStatsService:
             'presence_percentage': round((present_count / total_recorded_lessons) * 100, 1) if total_recorded_lessons > 0 else None
         }
 
+    # Возвращает сводку по посещаемости для указанной учебной группы в учебном периоде.
+    # Включает общую статистику по статусам, средний процент посещаемости по группе.
     def get_group_attendance_summary(self, student_group_id, study_period_id):
         try: group = StudentGroup.objects.get(pk=student_group_id)
         except StudentGroup.DoesNotExist: return {"error": _("Группа не найдена.")}
@@ -313,115 +294,76 @@ class AttendanceStatsService:
             'unique_lessons_with_attendance_records': unique_lessons_with_attendance_count
         }
 
+# Класс HomeworkStatsService предоставляет методы для расчета и получения
+# статистики по домашним заданиям.
 class HomeworkStatsService:
-    # --- ДОБАВЛЕННЫЙ МЕТОД ---
+    # Возвращает общую статистику по сдаче домашних заданий в указанном
+    # учебном году или периоде (количество выданных ДЗ, средний процент сдачи,
+    # средний процент сдачи в срок).
+    # Внимание: этот метод может быть ресурсоемким из-за необходимости итерации по ДЗ.
     def get_overall_submission_stats(self, academic_year_id=None, study_period_id=None):
         homework_qs = Homework.objects.all()
-        if study_period_id:
-            homework_qs = homework_qs.filter(journal_entry__lesson__study_period_id=study_period_id)
-        elif academic_year_id:
-            homework_qs = homework_qs.filter(journal_entry__lesson__study_period__academic_year_id=academic_year_id)
+        if study_period_id: homework_qs = homework_qs.filter(journal_entry__lesson__study_period_id=study_period_id)
+        elif academic_year_id: homework_qs = homework_qs.filter(journal_entry__lesson__study_period__academic_year_id=academic_year_id)
         total_homeworks = homework_qs.count()
         if total_homeworks == 0: return {"total_homeworks_issued": 0, "average_submission_rate_percent": None, "average_on_time_submission_rate_percent": None}
         
-        # Этот запрос может быть очень тяжелым без денормализации!
-        # Рассмотрите возможность хранения student_count в StudentGroup или подсчета через Celery.
-        total_possible_submissions = 0
-        total_actual_submissions = 0
-        total_on_time_submissions = 0
-
+        total_possible_submissions, total_actual_submissions, total_on_time_submissions = 0, 0, 0
         for hw in homework_qs.select_related('journal_entry__lesson__student_group').prefetch_related('journal_entry__lesson__student_group__students', 'submissions'):
             num_students_in_group = hw.journal_entry.lesson.student_group.students.count()
             total_possible_submissions += num_students_in_group
-            submissions_for_hw = hw.submissions.all() # Already prefetched
+            submissions_for_hw = hw.submissions.all()
             total_actual_submissions += submissions_for_hw.count()
-            if hw.due_date:
-                total_on_time_submissions += submissions_for_hw.filter(submitted_at__lte=hw.due_date).count()
-            else:
-                total_on_time_submissions += submissions_for_hw.count()
+            if hw.due_date: total_on_time_submissions += submissions_for_hw.filter(submitted_at__lte=hw.due_date).count()
+            else: total_on_time_submissions += submissions_for_hw.count()
         
         avg_submission_rate = round((total_actual_submissions / total_possible_submissions) * 100, 1) if total_possible_submissions > 0 else None
         avg_on_time_rate = round((total_on_time_submissions / total_actual_submissions) * 100, 1) if total_actual_submissions > 0 else None
         
         return {
-            "total_homeworks_issued": total_homeworks,
-            "total_possible_submissions": total_possible_submissions,
-            "total_actual_submissions": total_actual_submissions,
-            "average_submission_rate_percent": avg_submission_rate,
+            "total_homeworks_issued": total_homeworks, "total_possible_submissions": total_possible_submissions,
+            "total_actual_submissions": total_actual_submissions, "average_submission_rate_percent": avg_submission_rate,
             "average_on_time_submission_rate_percent": avg_on_time_rate,
         }
 
+    # Возвращает сводку по сдаче домашних заданий для конкретного преподавателя
+    # в указанном учебном периоде. Для каждого ДЗ преподавателя рассчитывается
+    # количество ожидаемых сдач, полученных, сданных в срок, оцененных и средняя оценка.
     def get_homework_submission_summary_for_teacher(self, teacher_id, study_period_id):
-        try:
-            teacher = User.objects.get(pk=teacher_id, role=User.Role.TEACHER)
-        except User.DoesNotExist:
-            return {"error": _("Преподаватель не найден.")}
-
-        homeworks_qs = Homework.objects.filter(
-            Q(author=teacher) | Q(journal_entry__lesson__teacher=teacher),
-            journal_entry__lesson__study_period_id=study_period_id
-        ).select_related(
-            'journal_entry__lesson__student_group',
-            'journal_entry__lesson__subject'
-        ).prefetch_related(
-            'submissions__student', 
-            'submissions__grade_for_submission' 
-        ).distinct()
-
+        try: teacher = User.objects.get(pk=teacher_id, role=User.Role.TEACHER)
+        except User.DoesNotExist: return {"error": _("Преподаватель не найден.")}
+        homeworks_qs = Homework.objects.filter(Q(author=teacher) | Q(journal_entry__lesson__teacher=teacher), journal_entry__lesson__study_period_id=study_period_id)\
+            .select_related('journal_entry__lesson__student_group', 'journal_entry__lesson__subject')\
+            .prefetch_related('submissions__student', 'submissions__grade_for_submission').distinct()
         results = []
         for hw in homeworks_qs:
             students_in_group_count = hw.journal_entry.lesson.student_group.students.count()
-            all_submissions_for_hw = hw.submissions.all()
-            submitted_count = all_submissions_for_hw.count()
-            
-            on_time_count = 0
-            if hw.due_date:
-                on_time_count = all_submissions_for_hw.filter(submitted_at__lte=hw.due_date).count()
-            else:
-                on_time_count = submitted_count
-            
-            grades = [
-                s.grade_for_submission.numeric_value 
-                for s in all_submissions_for_hw 
-                if hasattr(s, 'grade_for_submission') and 
-                   s.grade_for_submission and 
-                   s.grade_for_submission.numeric_value is not None
-            ]
+            all_submissions_for_hw = hw.submissions.all(); submitted_count = all_submissions_for_hw.count()
+            on_time_count = all_submissions_for_hw.filter(submitted_at__lte=hw.due_date).count() if hw.due_date else submitted_count
+            grades = [s.grade_for_submission.numeric_value for s in all_submissions_for_hw if hasattr(s, 'grade_for_submission') and s.grade_for_submission and s.grade_for_submission.numeric_value is not None]
             avg_grade = round(sum(grades) / len(grades), 2) if grades else None
             graded_count = Grade.objects.filter(homework_submission__homework=hw).count()
-            
             results.append({
-                'homework_id': hw.id,
-                'homework_title': hw.title,
-                'subject_name': hw.journal_entry.lesson.subject.name,
-                'group_name': hw.journal_entry.lesson.student_group.name,
-                'due_date': hw.due_date, # Остается как datetime.datetime или None
-                'total_students_expected': students_in_group_count,
-                'submissions_received': submitted_count,
-                'submissions_on_time': on_time_count,
-                'submissions_graded': graded_count,
+                'homework_id': hw.id, 'homework_title': hw.title, 'subject_name': hw.journal_entry.lesson.subject.name,
+                'group_name': hw.journal_entry.lesson.student_group.name, 'due_date': hw.due_date,
+                'total_students_expected': students_in_group_count, 'submissions_received': submitted_count,
+                'submissions_on_time': on_time_count, 'submissions_graded': graded_count,
                 'submission_rate_percent': round((submitted_count / students_in_group_count) * 100, 1) if students_in_group_count > 0 else 0,
                 'average_grade': avg_grade
             })
-        
-        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-        return sorted(
-            results, 
-            key=lambda x: (x['due_date'].date() if x['due_date'] else date.max, x['homework_title']), 
-            reverse=True
-        )
+        return sorted(results, key=lambda x: (x['due_date'].date() if x['due_date'] else date.max, x['homework_title']), reverse=True)
 
+    # Возвращает сводку по домашним заданиям для конкретного студента
+    # в указанном учебном периоде. Для каждого ДЗ отображается статус сдачи и оценка (если есть).
     def get_student_homework_summary(self, student_id, study_period_id):
         try: student = User.objects.get(pk=student_id, role=User.Role.STUDENT)
         except User.DoesNotExist: return {"error": _("Студент не найден.")}
         student_groups_in_period = StudentGroup.objects.filter(students=student, lessons__study_period_id=study_period_id).distinct()
         if not student_groups_in_period.exists(): return {"info": _("Нет групп или ДЗ для этого студента в указанном периоде.")}
-        homeworks_for_student = Homework.objects.filter(
-            journal_entry__lesson__student_group__in=student_groups_in_period,
-            journal_entry__lesson__study_period_id=study_period_id
-        ).select_related('journal_entry__lesson__subject', 'author')\
-         .prefetch_related(Prefetch('submissions', queryset=HomeworkSubmission.objects.filter(student=student).select_related('grade_for_submission'), to_attr='my_submission_list'))\
-         .distinct().order_by('-due_date', '-created_at')
+        homeworks_for_student = Homework.objects.filter(journal_entry__lesson__student_group__in=student_groups_in_period, journal_entry__lesson__study_period_id=study_period_id)\
+            .select_related('journal_entry__lesson__subject', 'author')\
+            .prefetch_related(Prefetch('submissions', queryset=HomeworkSubmission.objects.filter(student=student).select_related('grade_for_submission'), to_attr='my_submission_list'))\
+            .distinct().order_by('-due_date', '-created_at')
         results = []
         for hw in homeworks_for_student:
             my_submission = hw.my_submission_list[0] if hw.my_submission_list else None
@@ -429,15 +371,13 @@ class HomeworkStatsService:
             if my_submission:
                 status = _("Сдано")
                 if hasattr(my_submission, 'grade_for_submission') and my_submission.grade_for_submission:
-                    grade = my_submission.grade_for_submission; grade_value = grade.grade_value
-                    status += f" (Оценено: {grade_value})"
+                    grade = my_submission.grade_for_submission; grade_value = grade.grade_value; status += f" (Оценено: {grade_value})"
                 else: status += _(" (Ожидает проверки)")
             elif hw.due_date and timezone.now().replace(tzinfo=None) > hw.due_date.replace(tzinfo=None): status = _("Не сдано (Срок истек)")
             else: status = _("Не сдано")
             results.append({
                 'homework_id': hw.id, 'homework_title': hw.title, 'subject_name': hw.journal_entry.lesson.subject.name,
                 'teacher_name': hw.author.get_full_name() if hw.author else "N/A", 'due_date': hw.due_date,
-                'submission_status': status, 'my_grade': grade_value,
-                'submitted_at': my_submission.submitted_at if my_submission else None,
+                'submission_status': status, 'my_grade': grade_value, 'submitted_at': my_submission.submitted_at if my_submission else None,
             })
         return results

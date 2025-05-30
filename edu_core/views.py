@@ -1,4 +1,5 @@
 # edu_core/views.py
+from decimal import ROUND_HALF_UP, Decimal
 from urllib import request
 from rest_framework.views import APIView
 from datetime import datetime
@@ -1436,11 +1437,72 @@ class CuratorGroupPerformanceView(generics.ListAPIView):
         return StudentGroup.objects.filter(pk=group.pk).prefetch_related(Prefetch('students',queryset=User.objects.filter(role=User.Role.STUDENT).prefetch_related(Prefetch('grades_received',queryset=Grade.objects.filter(study_period_id=study_period_id, numeric_value__isnull=False).select_related('subject'),to_attr='period_grades_for_stats')),to_attr='students_with_grades_for_stats'))
     def get_serializer_context(self): context = super().get_serializer_context(); context['study_period_id'] = self.request.query_params.get('study_period_id'); return context
     def list(self, request, *args, **kwargs):
-        study_period_id = self.request.query_params.get('study_period_id')
-        if not study_period_id: return Response({"detail": _("Параметр 'study_period_id' обязателен.")}, status=status.HTTP_400_BAD_REQUEST)
-        queryset = self.get_queryset()
-        if not queryset.exists(): return Response(status=status.HTTP_404_NOT_FOUND)
-        serializer = self.get_serializer(queryset.first(), context=self.get_serializer_context()); return Response(serializer.data)
+        # --- Валидация параметров ---
+        group_id_str = request.query_params.get('group_id') # Для GroupPerformanceView
+        if not group_id_str and 'group_pk' in self.kwargs: # Для CuratorGroupPerformanceView
+             group_id_str = str(self.kwargs.get('group_pk'))
+        
+        study_period_id_str = request.query_params.get('study_period_id')
+
+        if not group_id_str or not study_period_id_str:
+            return Response(
+                {"detail": _("Параметры 'group_id' (или group_pk в URL) и 'study_period_id' обязательны.")},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            # group_id уже будет получен из URL kwargs для CuratorGroupPerformanceView,
+            # или из query_params для общего GroupPerformanceView
+            group_id = int(group_id_str) # Пере-валидация, если из query_params
+            study_period_id = int(study_period_id_str)
+        except ValueError:
+            return Response(
+                {"detail": _("ID группы и периода должны быть числами.")},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        queryset = self.get_queryset() # get_queryset уже отфильтрует по правам
+        
+        if not queryset.exists():
+            return Response(
+                {"detail": _("Группа не найдена, нет данных или у вас нет прав доступа к этой группе.")}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # get_queryset возвращает queryset из одного StudentGroup (или пустой)
+        instance = queryset.first() # instance - это объект StudentGroup
+
+        # --- РАСЧЕТ 'average_grade_for_period' для каждого студента ПЕРЕД СЕРИАЛИЗАЦИЕЙ ---
+        if instance and hasattr(instance, 'students_with_grades_for_stats'):
+            for student_obj in instance.students_with_grades_for_stats:
+                # 'period_grades_for_stats' уже должен быть на student_obj благодаря Prefetch
+                grades_for_student_period = getattr(student_obj, 'period_grades_for_stats', [])
+                
+                weighted_sum = Decimal('0.0')
+                total_weight = Decimal('0.0')
+                
+                for grade in grades_for_student_period:
+                    if grade.numeric_value is not None and grade.weight > 0:
+                        # Убедимся, что numeric_value это Decimal
+                        numeric_val_decimal = grade.numeric_value if isinstance(grade.numeric_value, Decimal) else Decimal(str(grade.numeric_value))
+                        weighted_sum += numeric_val_decimal * Decimal(str(grade.weight))
+                        total_weight += Decimal(str(grade.weight))
+                
+                if total_weight > Decimal('0.0'):
+                    # Добавляем рассчитанный атрибут к объекту студента
+                    student_obj.average_grade_for_period = (weighted_sum / total_weight).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                else:
+                    student_obj.average_grade_for_period = None
+        # --- КОНЕЦ РАСЧЕТА ---
+
+        serializer_context = self.get_serializer_context()
+        # Обновляем контекст, если study_period_id был определен только что
+        if 'study_period_id' not in serializer_context and study_period_id:
+             serializer_context['study_period_id'] = study_period_id
+        if 'group_id' not in serializer_context and group_id:
+             serializer_context['group_id'] = group_id
+
+        serializer = self.get_serializer(instance, context=serializer_context)
+        return Response(serializer.data)
 
 # --- ПАНЕЛЬ СТУДЕНТА ---
 class StudentMyScheduleListView(generics.ListAPIView):
