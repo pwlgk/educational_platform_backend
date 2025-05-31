@@ -81,9 +81,9 @@ TEACHER_ASSIGNMENTS = [
 NUM_TEACHERS_ACTUAL = len(TEACHER_ASSIGNMENTS)
 
 LESSON_TIMES = [
-    (time(8, 30), time(9, 15)), (time(9, 25), time(10, 10)), (time(10, 20), time(11, 05)),
-    (time(11, 25), time(12, 10)), (time(12, 20), time(13, 05)), (time(13, 15), time(14, 00)),
-    (time(14, 10), time(14, 55)), (time(15, 05), time(15, 50))
+    (time(8, 30), time(9, 15)), (time(9, 25), time(10, 10)), (time(10, 20), time(11, 10)),
+    (time(11, 25), time(12, 10)), (time(12, 20), time(13, 10)), (time(13, 15), time(14, 00)),
+    (time(14, 10), time(14, 55)), (time(15, 10), time(15, 50))
 ]
 LESSONS_PER_DAY_MAP = {
     range(1, 5): (3, 4), range(5, 10): (4, 6), range(10, 12): (5, 7)

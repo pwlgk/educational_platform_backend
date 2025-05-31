@@ -209,7 +209,7 @@ else:
     # DEFAULT_FROM_EMAIL = 'webmaster@example.com'
 
 
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173') # Или другой порт вашего локального фронтенда
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
 EMAIL_CONFIRMATION_EXPIRE_DAYS = 1
 PASSWORD_RESET_TIMEOUT_HOURS = int(os.environ.get('PASSWORD_RESET_TIMEOUT_HOURS', 24))
 
