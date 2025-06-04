@@ -27,6 +27,12 @@ from .permissions import IsAdmin, IsOwnerOrAdmin, IsTeacherOrAdmin
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
+from rest_framework.pagination import LimitOffsetPagination
+
+class StandardLimitOffsetPagination(LimitOffsetPagination):
+    default_limit = 10
+    max_limit = 100
+
 # Класс RegisterView обрабатывает запросы на регистрацию новых пользователей.
 # Наследуется от generics.CreateAPIView, что обеспечивает базовый функционал для создания объектов.
 # - queryset: Определяет набор данных, с которым работает представление (все пользователи).
@@ -36,6 +42,7 @@ User = get_user_model()
 # который включает сообщение о необходимости подтверждения email или об успешной активации по инвайт-коду,
 # а также данные созданного пользователя.
 class RegisterView(generics.CreateAPIView):
+    
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
     permission_classes = [permissions.AllowAny]
@@ -146,6 +153,8 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 # Метод get_queryset определяет, каких пользователей может видеть запрашивающий:
 # администраторы видят всех (кроме себя), обычные пользователи видят активных и подтвержденных (кроме себя).
 class UserViewSet(viewsets.ReadOnlyModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
+
     serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
@@ -170,6 +179,7 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
 # инициировать сброс пароля для указанного пользователя. При этом генерируется токен,
 # сохраняется в БД и пользователю отправляется email со ссылкой для сброса.
 class AdminUserViewSet(viewsets.ModelViewSet):
+    
     queryset = User.objects.select_related('profile').prefetch_related('parents', 'children').all().order_by('id')
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]

@@ -82,7 +82,7 @@ class Echo:
         return value
 
 class StandardLimitOffsetPagination(LimitOffsetPagination):
-    default_limit = 10
+    default_limit = 30
     max_limit = 100
 
 # --- АДМИНСКИЕ VIEWSETS ---
@@ -90,6 +90,7 @@ class AcademicYearViewSet(viewsets.ModelViewSet):
     queryset = AcademicYear.objects.all().order_by('-start_date')
     serializer_class = AcademicYearSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = StandardLimitOffsetPagination
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -108,6 +109,8 @@ class AcademicYearViewSet(viewsets.ModelViewSet):
                 "study_period_creation_error": _("Учебный год создан, но не удалось автоматически создать идентичный учебный период. Ошибка: %(error)s") % {'error': str(e)}
             })
 class StudyPeriodViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
+
     queryset = StudyPeriod.objects.select_related('academic_year').all()
     serializer_class = StudyPeriodSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -117,11 +120,13 @@ class StudyPeriodViewSet(viewsets.ModelViewSet):
     ordering = ['academic_year__start_date', 'start_date']
 
 class SubjectTypeViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     queryset = SubjectType.objects.all().order_by('name')
     serializer_class = SubjectTypeSerializer
     permission_classes = [permissions.IsAuthenticated, IsTeacherOrAdmin]
 
 class SubjectViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     # Базовый queryset - все предметы, для админа
     queryset = Subject.objects.select_related('subject_type').prefetch_related('lead_teachers__profile').all()
     serializer_class = SubjectSerializer
@@ -199,6 +204,7 @@ class SubjectViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 class ClassroomViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     queryset = Classroom.objects.all()
     serializer_class = ClassroomSerializer
     permission_classes = [permissions.IsAuthenticated, IsTeacherOrAdmin]
@@ -209,6 +215,7 @@ class ClassroomViewSet(viewsets.ModelViewSet):
     ordering = ['identifier']
 
 class StudentGroupViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     queryset = StudentGroup.objects.select_related(
         'academic_year', 'curator', 'group_monitor'
     ).prefetch_related('students').all()
@@ -283,6 +290,7 @@ class StudentGroupViewSet(viewsets.ModelViewSet):
             instance.students.clear()
 
 class CurriculumViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     queryset = Curriculum.objects.select_related('academic_year', 'student_group').prefetch_related('entries__subject', 'entries__teacher', 'entries__study_period').all()
     serializer_class = CurriculumSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -292,6 +300,7 @@ class CurriculumViewSet(viewsets.ModelViewSet):
     ordering_fields = ['name', 'academic_year__name', 'student_group__name']
     ordering = ['academic_year__start_date', 'student_group__name', 'name']
 class CurriculumEntryViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     # queryset можно определить более общим или убрать его определение на уровне класса,
     # так как get_queryset() его полностью переопределит для вложенного маршрута.
     # queryset = CurriculumEntry.objects.all() # Можно оставить для не-вложенного доступа, если он нужен
@@ -364,6 +373,7 @@ class LessonViewSet(viewsets.ModelViewSet):
     Предоставляет CRUD для админов/учителей и кастомный эндпоинт 'my-schedule'
     для получения персонального расписания студентов, учителей и родителей.
     """
+    pagination_class = StandardLimitOffsetPagination
     queryset = Lesson.objects.select_related(
         'study_period__academic_year', 
         'student_group', 
@@ -558,6 +568,7 @@ class LessonViewSet(viewsets.ModelViewSet):
             send_notification(r_user, message, Notification.NotificationType.SCHEDULE, related_object=None)
 
 class LessonJournalEntryViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     queryset = LessonJournalEntry.objects.select_related('lesson__subject', 'lesson__student_group', 'lesson__teacher', 'lesson__study_period__academic_year').prefetch_related('homework_assignments', 'attendances').all()
     serializer_class = LessonJournalEntrySerializer
     # permission_classes определены в get_permissions
@@ -665,7 +676,7 @@ class HomeworkViewSet(viewsets.ModelViewSet):
         notify_new_homework(homework)
 
 class StudentMyHomeworkDetailView(generics.RetrieveAPIView):
-
+    pagination_class = StandardLimitOffsetPagination
     serializer_class = MyHomeworkSerializer
     permission_classes = [permissions.IsAuthenticated, IsStudent]
     lookup_url_kwarg = 'homework_id'
@@ -698,6 +709,7 @@ class StudentMyHomeworkDetailView(generics.RetrieveAPIView):
         return context
 
 class HomeworkAttachmentViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     queryset = HomeworkAttachment.objects.select_related(
         'homework__author', # Автор самого ДЗ
         'homework__journal_entry__lesson__teacher' # Учитель урока, к которому привязано ДЗ
@@ -1141,7 +1153,7 @@ class HomeworkSubmissionViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class SubmissionAttachmentViewSet(viewsets.ModelViewSet):
-    # ... (без изменений, т.к. здесь нет событий для уведомлений) ...
+    pagination_class = StandardLimitOffsetPagination
     queryset = SubmissionAttachment.objects.select_related('submission__homework', 'submission__student').all()
     serializer_class = SubmissionAttachmentSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -1173,7 +1185,7 @@ class SubmissionAttachmentViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 class AttendanceViewSet(viewsets.ModelViewSet):
-    # ... (без изменений, если не требуются уведомления об отметке посещаемости) ...
+    pagination_class = StandardLimitOffsetPagination
     queryset = Attendance.objects.select_related('journal_entry__lesson__subject', 'student', 'marked_by').all()
     serializer_class = AttendanceSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -1217,6 +1229,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         return Response({"results": results, "message": _("Посещаемость обновлена.")}, status=status.HTTP_200_OK)
 
 class GradeViewSet(viewsets.ModelViewSet):
+    pagination_class = StandardLimitOffsetPagination
     queryset = Grade.objects.select_related('student', 'subject', 'study_period', 'academic_year', 'lesson__teacher', 'homework_submission__homework__author', 'graded_by').all()
     serializer_class = GradeSerializer
     # permission_classes определены в get_permissions
@@ -1319,7 +1332,7 @@ class GradeViewSet(viewsets.ModelViewSet):
             notify_new_grade(grade) # Используем ту же функцию, текст будет "Новая оценка: ..."
 
 class SubjectMaterialViewSet(viewsets.ModelViewSet):
-    # ... (без изменений, если не нужны уведомления о новых материалах) ...
+    pagination_class = StandardLimitOffsetPagination
     queryset = SubjectMaterial.objects.select_related('subject', 'student_group', 'uploaded_by').prefetch_related('attachments').all()
     serializer_class = SubjectMaterialSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -1355,6 +1368,8 @@ class SubjectMaterialViewSet(viewsets.ModelViewSet):
 # Копирую без изменений, т.к. они в основном для чтения или специфических действий, не требующих новых уведомлений
 # --- ПАНЕЛЬ ПРЕПОДАВАТЕЛЯ ---
 class TeacherMyScheduleViewSet(LessonViewSet): # Наследуемся от вашего основного LessonViewSet
+    pagination_class = StandardLimitOffsetPagination
+
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
     serializer_class = LessonListSerializer # Используем легковесный сериализатор для списка
     http_method_names = ['get', 'head', 'options'] # Только чтение
@@ -1386,6 +1401,8 @@ class TeacherMyScheduleViewSet(LessonViewSet): # Наследуемся от в�
         return queryset.distinct() # .order_by('start_time') - сортировка будет от OrderingFilter
 
 class TeacherMyGroupsView(generics.ListAPIView):
+    pagination_class = StandardLimitOffsetPagination
+
     serializer_class = StudentGroupSerializer
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -1400,15 +1417,17 @@ class TeacherMyGroupsView(generics.ListAPIView):
         queryset = StudentGroup.objects.filter(Q(academic_year=current_active_year) & (Q(curator=user) | Q(id__in=list(teaching_group_ids)))).select_related('academic_year', 'curator', 'group_monitor').prefetch_related('students').distinct()
         return queryset
     
-class TeacherLessonJournalViewSet(LessonJournalEntryViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher]
-class TeacherHomeworkViewSet(HomeworkViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher]
-class TeacherHomeworkSubmissionViewSet(HomeworkSubmissionViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher]
-class TeacherAttendanceViewSet(AttendanceViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher]
-class TeacherGradeViewSet(GradeViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher]
-class TeacherSubjectMaterialViewSet(SubjectMaterialViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher]
+class TeacherLessonJournalViewSet(LessonJournalEntryViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher];     pagination_class = StandardLimitOffsetPagination
+class TeacherHomeworkViewSet(HomeworkViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher];     pagination_class = StandardLimitOffsetPagination
+class TeacherHomeworkSubmissionViewSet(HomeworkSubmissionViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher];     pagination_class = StandardLimitOffsetPagination
+class TeacherAttendanceViewSet(AttendanceViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher];     pagination_class = StandardLimitOffsetPagination
+class TeacherGradeViewSet(GradeViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher];     pagination_class = StandardLimitOffsetPagination
+class TeacherSubjectMaterialViewSet(SubjectMaterialViewSet): permission_classes = [permissions.IsAuthenticated, IsTeacher];     pagination_class = StandardLimitOffsetPagination
 
 # --- ПАНЕЛЬ КУРАТОРА ---
 class CuratorManagedGroupsViewSet(StudentGroupViewSet):
+    pagination_class = StandardLimitOffsetPagination
+
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
     http_method_names = ['get', 'retrieve', 'put', 'patch', 'head', 'options'] # Разрешаем редактирование
     def get_queryset(self): return StudentGroup.objects.filter(curator=self.request.user).select_related('academic_year', 'curator', 'group_monitor').prefetch_related('students').order_by('name')
@@ -1425,6 +1444,8 @@ class CuratorManagedGroupsViewSet(StudentGroupViewSet):
         super().perform_update(serializer)
 
 class CuratorGroupPerformanceView(generics.ListAPIView):
+    pagination_class = StandardLimitOffsetPagination
+
     serializer_class = GroupPerformanceSerializer
     permission_classes = [permissions.IsAuthenticated, IsTeacher]
     filter_backends = [] # Явные параметры запроса
@@ -1506,6 +1527,8 @@ class CuratorGroupPerformanceView(generics.ListAPIView):
 
 # --- ПАНЕЛЬ СТУДЕНТА ---
 class StudentMyScheduleListView(generics.ListAPIView):
+    pagination_class = StandardLimitOffsetPagination
+
     """
     Возвращает список занятий (расписание) для аутентифицированного студента.
     Поддерживает фильтрацию по диапазону дат, ID предмета и ID преподавателя.
@@ -1543,6 +1566,8 @@ class StudentMyScheduleListView(generics.ListAPIView):
             'study_period', 'subject', 'teacher', 'classroom'
         ).distinct().order_by(*self.ordering) # Используем self.ordering для сортировки
 class StudentMyGradesListView(generics.ListAPIView):
+    pagination_class = StandardLimitOffsetPagination
+
     serializer_class = MyGradeSerializer; permission_classes = [permissions.IsAuthenticated, IsStudent]; filter_backends = [DjangoFilterBackend, filters.OrderingFilter]; filterset_fields = {'subject': ['exact'], 'study_period': ['exact'], 'academic_year': ['exact'], 'grade_type': ['exact', 'in'], 'date_given': ['gte', 'lte']}; ordering_fields = ['-date_given', 'subject__name']; ordering = ['-date_given']
     def get_queryset(self): return Grade.objects.filter(student=self.request.user).select_related('subject', 'study_period', 'academic_year', 'lesson', 'graded_by').distinct()
 
@@ -1551,6 +1576,8 @@ class StudentMyAttendanceListView(generics.ListAPIView):
     def get_queryset(self): return Attendance.objects.filter(student=self.request.user).select_related('journal_entry__lesson__subject', 'student').distinct()
 
 class StudentMyHomeworkListView(generics.ListAPIView):
+    pagination_class = StandardLimitOffsetPagination
+
     serializer_class = MyHomeworkSerializer
     permission_classes = [permissions.IsAuthenticated, IsStudent]
     pagination_class = StandardLimitOffsetPagination
@@ -1618,7 +1645,9 @@ class StudentMyHomeworkListView(generics.ListAPIView):
         return context
 class StudentMyHomeworkSubmissionViewSet(viewsets.ModelViewSet): # Можно наследовать от ModelViewSet напрямую
     serializer_class = StudentHomeworkSubmissionSerializer # Используем студенческий сериализатор
-    permission_classes = [permissions.IsAuthenticated, IsStudent] # Права на уровне класса
+    permission_classes = [permissions.IsAuthenticated, IsStudent] # Права на уровне класса/
+    pagination_class = StandardLimitOffsetPagination
+
 
     def get_queryset(self):
         # Студент видит только свои сдачи
@@ -1707,6 +1736,7 @@ class ParentChildDataMixin:
 class ParentChildScheduleListView(ParentChildDataMixin, generics.ListAPIView):
     serializer_class = LessonListSerializer
     permission_classes = [permissions.IsAuthenticated, IsParent] # Убедимся, что пермишен IsParent есть
+    pagination_class = StandardLimitOffsetPagination
 
     # Фильтр бэкенды: DjangoFilterBackend для полей, SearchFilter для поиска
     filter_backends = [DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
@@ -1762,6 +1792,8 @@ class ParentChildScheduleListView(ParentChildDataMixin, generics.ListAPIView):
         # Оставим distinct() в конце, после применения всех фильтров DRF.
         return queryset.distinct() # Применяем distinct в конце
 class ParentChildGradesListView(ParentChildDataMixin, generics.ListAPIView):
+    pagination_class = StandardLimitOffsetPagination
+
     serializer_class = MyGradeSerializer; filter_backends = [DjangoFilterBackend, filters.OrderingFilter]; filterset_fields = {'subject': ['exact'], 'study_period': ['exact'], 'academic_year': ['exact'], 'grade_type': ['exact', 'in'], 'date_given': ['gte', 'lte']}; ordering_fields = ['-date_given', 'subject__name']; ordering = ['-date_given']
     def get_queryset(self):
         children_ids = self.get_target_children_ids();
@@ -1769,6 +1801,8 @@ class ParentChildGradesListView(ParentChildDataMixin, generics.ListAPIView):
         return Grade.objects.filter(student_id__in=children_ids).select_related('student', 'subject', 'study_period', 'academic_year', 'lesson', 'graded_by').distinct()
 
 class ParentChildAttendanceListView(ParentChildDataMixin, generics.ListAPIView):
+    pagination_class = StandardLimitOffsetPagination
+
     serializer_class = MyAttendanceSerializer; filter_backends = [DjangoFilterBackend, filters.OrderingFilter]; filterset_fields = {'status': ['exact'], 'journal_entry__lesson__start_time': ['date__gte', 'date__lte'], 'journal_entry__lesson__subject':['exact']}; ordering_fields = ['-journal_entry__lesson__start_time']; ordering = ['-journal_entry__lesson__start_time']
     def get_queryset(self):
         children_ids = self.get_target_children_ids();
@@ -1832,7 +1866,7 @@ class ParentChildHomeworkListView(ParentChildDataMixin, generics.ListAPIView):
 
 # --- ИМПОРТ ---
 class ImportDataView(generics.GenericAPIView):
-    # ... (без изменений) ...
+
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
     def get_serializer_class_for_import(self, import_type):
         if import_type == 'teachers': return TeacherImportSerializer

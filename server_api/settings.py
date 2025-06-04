@@ -196,17 +196,23 @@ SIMPLE_JWT = {
 
 if DEBUG: # Или просто для локальной разработки
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    # EMAIL_HOST = 'mail.erudit-ims.ru'
+    # EMAIL_PORT = 587
+    # EMAIL_USE_TLS = True
+    # EMAIL_HOST_USER = 'noreply@erudit-ims.ru'
+    # EMAIL_HOST_PASSWORD = '^amWcETX5:%0d@(L'
+    # DEFAULT_FROM_EMAIL = 'noreply@erudit-ims.ru'
 else:
     # Настройки для реального SMTP (для продакшена)
     EMAIL_BACKEND = os.environ.get('DJANGO_EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
     EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.yourprovider.com')
 
-    # EMAIL_HOST = 'smtp.example.com'
+    # EMAIL_HOST = 'mail.erudit-ims.ru'
     # EMAIL_PORT = 587
     # EMAIL_USE_TLS = True
-    # EMAIL_HOST_USER = 'your_email@example.com'
-    # EMAIL_HOST_PASSWORD = 'your_password'
-    # DEFAULT_FROM_EMAIL = 'webmaster@example.com'
+    # EMAIL_HOST_USER = 'noreply@erudit-ims.ru'
+    # EMAIL_HOST_PASSWORD = '^amWcETX5:%0d@(L'
+    # DEFAULT_FROM_EMAIL = 'noreply@erudit-ims.ru'
 
 
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
@@ -222,7 +228,7 @@ CORS_ALLOW_ALL_ORIGINS = True # Для разработки. В продакше
 #     "http://127.0.0.1:3000",
 # ]
 # CORS_ALLOW_CREDENTIALS = True # Если фронтенд отправляет куки или заголовки авторизации
-
+PLATFORM_NAME =  'Эрудит'
 # --- Настройки drf-spectacular ---
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Educational Platform API',

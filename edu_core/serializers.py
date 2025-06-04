@@ -1071,7 +1071,6 @@ class StudentGroupImportSerializer(serializers.Serializer):
         if students_to_add: group.students.set(students_to_add)
         return group
 
-# class ScheduleImportSerializer(serializers.Serializer): # Очень сложный, требует детальной проработки
 
 # --- Сериализаторы для Статистики ---
 
