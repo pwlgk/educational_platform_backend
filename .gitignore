@@ -1,3 +1,5 @@
 db.sqlite3
 venv
 .env
+server_api/settings.py
+settings.py
